@@ -14,6 +14,7 @@ const TOOL_NAMES = [
   "harbor_repo_search",
   "harbor_workspace_read_file",
   "harbor_workspace_write_file",
+  "harbor_workspace_delete_path",
   "harbor_workspace_diff",
   "harbor_tests_run",
   "harbor_publish_preview",
@@ -279,6 +280,38 @@ export default function harborPiExtension(pi: ExtensionAPI): void {
         const result = await invokeWithApproval(state, ctx, {
           capability: "workspace.writeFile",
           input: { path: params.path, content: params.content },
+        });
+        return toolResponse(resultToText(result), result);
+      },
+    }),
+  );
+
+  pi.registerTool(
+    defineTool({
+      name: "harbor_workspace_delete_path",
+      label: "Harbor Workspace Delete",
+      description: "Delete a file or directory path in Harbor overlay drafts (does not publish).",
+      promptSnippet: "Delete draft paths in Harbor overlay.",
+      parameters: Type.Object({
+        path: Type.String({ description: "Repository-relative file or directory path" }),
+        fileOnly: Type.Optional(
+          Type.Boolean({
+            description: "Delete only a single file path (disable recursive directory delete)",
+            default: false,
+          }),
+        ),
+      }),
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        const state = runtime.state;
+        if (!state) {
+          return toolResponse("Harbor session not initialized");
+        }
+        const result = await invokeWithApproval(state, ctx, {
+          capability: "workspace.deletePath",
+          input: {
+            path: params.path,
+            recursive: !(params.fileOnly ?? false),
+          },
         });
         return toolResponse(resultToText(result), result);
       },
