@@ -57,12 +57,33 @@ function resultToText(result: PiInvokeResult): string {
     return JSON.stringify(result.value, null, 2);
   }
   if (result.status === "approval_required") {
-    return result.intent ?? result.message;
+    const lines = [result.intent ?? result.message];
+    if (result.reason) {
+      lines.push(`Reason: ${result.reason}`);
+    }
+    if (result.nextAction) {
+      lines.push(`Next: ${result.nextAction}`);
+    }
+    if (result.grantScopeHint) {
+      lines.push(`Suggested scope: ${result.grantScopeHint}`);
+    }
+    return lines.join("\n");
+  }
+  if (result.status === "denied") {
+    const lines = [result.message];
+    if (result.reason) {
+      lines.push(`Reason: ${result.reason}`);
+    }
+    if (result.nextAction) {
+      lines.push(`Next: ${result.nextAction}`);
+    }
+    return lines.join("\n");
   }
   if (result.status === "validation_error") {
     return `${result.message}\n${JSON.stringify(result.issues, null, 2)}`;
   }
-  return result.message;
+  const _exhaustive: never = result;
+  return JSON.stringify(_exhaustive);
 }
 
 function toolResponse(
@@ -100,7 +121,7 @@ async function invokeWithApproval(
 
   const approved = await ctx.ui.confirm(
     "Harbor approval required",
-    result.intent ?? result.message,
+    resultToText(result),
   );
   if (!approved) {
     return result;

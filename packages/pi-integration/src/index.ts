@@ -38,10 +38,17 @@ export type PiInvokeResult =
       status: "approval_required";
       message: string;
       intent?: string;
+      reason?: string;
+      nextAction?: string;
+      grantScopeHint?: ApprovalGrant["scope"];
+      targetLabel?: string;
     }
   | {
       status: "denied";
       message: string;
+      reason?: string;
+      nextAction?: string;
+      targetLabel?: string;
     }
   | {
       status: "validation_error";
@@ -58,10 +65,17 @@ export type PiRunModelTaskResult =
       status: "approval_required";
       message: string;
       intent?: string;
+      reason?: string;
+      nextAction?: string;
+      grantScopeHint?: ApprovalGrant["scope"];
+      targetLabel?: string;
     }
   | {
       status: "denied";
       message: string;
+      reason?: string;
+      nextAction?: string;
+      targetLabel?: string;
     }
   | {
       status: "validation_error";
@@ -124,12 +138,19 @@ export class PiHarborBridge {
           status: "approval_required",
           message: error.message,
           intent: error.record.approvalIntent,
+          reason: error.record.reason,
+          nextAction: error.record.nextAction,
+          grantScopeHint: error.record.grantScopeHint,
+          targetLabel: error.record.targetLabel,
         };
       }
       if (error instanceof PolicyDeniedError) {
         return {
           status: "denied",
           message: error.message,
+          reason: error.record.reason,
+          nextAction: error.record.nextAction,
+          targetLabel: error.record.targetLabel,
         };
       }
       if (error instanceof ValidationError) {
@@ -170,12 +191,19 @@ export class PiHarborBridge {
           status: "approval_required",
           message: error.message,
           intent: error.record.approvalIntent,
+          reason: error.record.reason,
+          nextAction: error.record.nextAction,
+          grantScopeHint: error.record.grantScopeHint,
+          targetLabel: error.record.targetLabel,
         };
       }
       if (error instanceof PolicyDeniedError) {
         return {
           status: "denied",
           message: error.message,
+          reason: error.record.reason,
+          nextAction: error.record.nextAction,
+          targetLabel: error.record.targetLabel,
         };
       }
       if (error instanceof ValidationError) {
@@ -189,9 +217,13 @@ export class PiHarborBridge {
     }
   }
 
-  makeApprovalGrant(effectClass: ApprovalGrant["effectClass"], targetId?: string): ApprovalGrant {
+  makeApprovalGrant(
+    effectClass: ApprovalGrant["effectClass"],
+    targetId?: string,
+    scope: ApprovalGrant["scope"] = "once",
+  ): ApprovalGrant {
     return {
-      scope: "once",
+      scope,
       effectClass,
       targetId,
     };

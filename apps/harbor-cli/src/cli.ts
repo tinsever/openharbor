@@ -75,6 +75,9 @@ async function main(): Promise<void> {
     case "publish":
       await cmdPublish(bridge, rest, parsed.options);
       return;
+    case "approvals":
+      await cmdApprovals(bridge, rest, parsed.options);
+      return;
     case "pi":
       await cmdPi(rest, parsed.options);
       return;
@@ -109,12 +112,19 @@ async function cmdCall(
   const sessionId = args[0];
   const capability = args[1];
   if (!sessionId || !capability) {
-    fail("Usage: harbor call <session-id> <capability> [--input '<json>'] [--grant <effectClass[:targetId]>]");
+    fail("Usage: harbor call <session-id> <capability> [--input '<json>'] [--grant <effectClass[:targetId]>] [--approve-scope <once|task|session>] [--task-id <id>]");
   }
 
   const inputRaw = getStringOption(options, "input");
   const input = inputRaw ? JSON.parse(inputRaw) : {};
   const grants = parseGrants(getStringArrayOption(options, "grant"));
+  const scope = getApprovalScopeOption(options);
+  if (scope === "task" && !getStringOption(options, "task-id")) {
+    fail("--task-id is required when --approve-scope task is used");
+  }
+  for (const grant of grants) {
+    grant.scope = scope;
+  }
 
   const result = await bridge.invoke({
     sessionId,
@@ -228,12 +238,17 @@ async function cmdTest(
   const sessionId = args[0];
   const adapter = args[1];
   if (!sessionId || !adapter) {
-    fail("Usage: harbor test <session-id> <adapter> [--timeout-ms <ms>] [--approve]");
+    fail("Usage: harbor test <session-id> <adapter> [--timeout-ms <ms>] [--approve] [--approve-scope <once|task|session>] [--task-id <id>]");
   }
 
   const grants: ApprovalGrant[] = [];
+  const scope = getApprovalScopeOption(options);
+  const taskId = getStringOption(options, "task-id");
+  if (scope === "task" && !taskId) {
+    fail("--task-id is required when --approve-scope task is used");
+  }
   if (options.approve) {
-    grants.push(bridge.makeApprovalGrant("execute.adapter", adapter));
+    grants.push(bridge.makeApprovalGrant("execute.adapter", adapter, scope));
   }
 
   const timeoutRaw = getStringOption(options, "timeout-ms");
@@ -247,6 +262,7 @@ async function cmdTest(
       timeoutMs,
     },
     approvalGrants: grants,
+    taskId,
   });
   printResult(result);
 }
@@ -258,7 +274,7 @@ async function cmdRun(
 ): Promise<void> {
   const sessionId = args[0];
   if (!sessionId) {
-    fail("Usage: harbor run <session-id> [--code '<js>'] [--file <path>] [--timeout-ms <ms>] [--approve-publish] [--approve-adapter <name>]");
+    fail("Usage: harbor run <session-id> [--code '<js>'] [--file <path>] [--timeout-ms <ms>] [--approve-publish] [--approve-adapter <name>] [--approve-scope <once|task|session>] [--task-id <id>]");
   }
 
   const code = await loadCodeFromFlags(options);
@@ -267,18 +283,22 @@ async function cmdRun(
   }
 
   const grants: ApprovalGrant[] = [];
+  const scope = getApprovalScopeOption(options);
+  const taskId = getStringOption(options, "task-id");
+  if (scope === "task" && !taskId) {
+    fail("--task-id is required when --approve-scope task is used");
+  }
   if (options["approve-publish"]) {
-    grants.push(bridge.makeApprovalGrant("publish.repo", "repo"));
+    grants.push(bridge.makeApprovalGrant("publish.repo", "repo", scope));
   }
   for (const adapterName of getStringArrayOption(options, "approve-adapter")) {
     if (adapterName.trim().length > 0) {
-      grants.push(bridge.makeApprovalGrant("execute.adapter", adapterName.trim()));
+      grants.push(bridge.makeApprovalGrant("execute.adapter", adapterName.trim(), scope));
     }
   }
 
   const timeoutRaw = getStringOption(options, "timeout-ms");
   const timeoutMs = timeoutRaw ? Number(timeoutRaw) : undefined;
-  const taskId = getStringOption(options, "task-id");
 
   const result = await bridge.runModelTask(sessionId, code, {
     taskId,
@@ -387,7 +407,7 @@ async function cmdPublish(
 ): Promise<void> {
   const sessionId = args[0];
   if (!sessionId) {
-    fail("Usage: harbor publish <session-id> [--approve] [--yes]");
+    fail("Usage: harbor publish <session-id> [--approve] [--approve-scope <once|task|session>] [--task-id <id>] [--yes]");
   }
 
   const preview = await bridge.invoke({
@@ -414,8 +434,13 @@ async function cmdPublish(
   }
 
   const grants: ApprovalGrant[] = [];
+  const scope = getApprovalScopeOption(options);
+  const taskId = getStringOption(options, "task-id");
+  if (scope === "task" && !taskId) {
+    fail("--task-id is required when --approve-scope task is used");
+  }
   if (options.approve) {
-    grants.push(bridge.makeApprovalGrant("publish.repo", "repo"));
+    grants.push(bridge.makeApprovalGrant("publish.repo", "repo", scope));
   }
 
   const result = await bridge.invoke({
@@ -423,8 +448,61 @@ async function cmdPublish(
     capability: "publish.apply",
     input: {},
     approvalGrants: grants,
+    taskId,
   });
   printResult(result);
+}
+
+async function cmdApprovals(
+  bridge: PiHarborBridge,
+  args: string[],
+  options: Record<string, string | boolean | string[]>,
+): Promise<void> {
+  const action = args[0];
+  const sessionId = args[1];
+  if (!action || !sessionId) {
+    fail("Usage: harbor approvals <list|revoke> <session-id> [flags]");
+  }
+
+  if (action === "list") {
+    const result = await bridge.invoke({
+      sessionId,
+      capability: "approvals.list",
+      input: {
+        includeInactive: options["include-inactive"] !== false,
+      },
+    });
+    printResult(result);
+    return;
+  }
+
+  if (action === "revoke") {
+    const grantId = getStringOption(options, "grant-id");
+    const taskId = getStringOption(options, "task-id");
+    const all = options.all === true;
+    const selectorCount = [grantId ? 1 : 0, taskId ? 1 : 0, all ? 1 : 0].reduce(
+      (sum, item) => sum + item,
+      0,
+    );
+    if (selectorCount !== 1) {
+      fail("Provide exactly one revocation selector: --grant-id, --task-id, or --all");
+    }
+
+    const result = await bridge.invoke({
+      sessionId,
+      capability: "approvals.revoke",
+      input: {
+        grantId,
+        taskId,
+        all,
+        reason: getStringOption(options, "reason"),
+      },
+    });
+    printResult(result);
+    return;
+  }
+
+  fail(`Unknown approvals action: ${action}`);
 }
 
 async function cmdPi(
@@ -581,6 +659,16 @@ function parseGrants(values: string[]): ApprovalGrant[] {
   return grants;
 }
 
+function getApprovalScopeOption(
+  options: Record<string, string | boolean | string[]>,
+): ApprovalGrant["scope"] {
+  const scope = (getStringOption(options, "approve-scope") ?? "once").trim().toLowerCase();
+  if (scope === "once" || scope === "task" || scope === "session") {
+    return scope;
+  }
+  fail(`Unknown --approve-scope value "${scope}". Expected once, task, or session.`);
+}
+
 function getPolicyPresetOption(
   options: Record<string, string | boolean | string[]>,
 ): ReturnType<typeof resolvePolicyPreset> {
@@ -605,6 +693,33 @@ async function loadCodeFromFlags(
 }
 
 function printResult(result: unknown): void {
+  if (isRecord(result) && result.status === "approval_required") {
+    const intent = typeof result.intent === "string" ? result.intent : "Approval required";
+    const reason = typeof result.reason === "string" ? result.reason : undefined;
+    const nextAction = typeof result.nextAction === "string" ? result.nextAction : undefined;
+    process.stdout.write(`${intent}\n`);
+    if (reason) {
+      process.stdout.write(`Reason: ${reason}\n`);
+    }
+    if (nextAction) {
+      process.stdout.write(`Next: ${nextAction}\n`);
+    }
+    if (typeof result.grantScopeHint === "string") {
+      process.stdout.write(`Suggested scope: ${result.grantScopeHint}\n`);
+    }
+    if (typeof result.targetLabel === "string") {
+      process.stdout.write(`Target: ${result.targetLabel}\n`);
+    }
+  }
+  if (isRecord(result) && result.status === "denied") {
+    process.stdout.write(`Denied: ${typeof result.message === "string" ? result.message : "policy denied"}\n`);
+    if (typeof result.reason === "string") {
+      process.stdout.write(`Reason: ${result.reason}\n`);
+    }
+    if (typeof result.nextAction === "string") {
+      process.stdout.write(`Next: ${result.nextAction}\n`);
+    }
+  }
   printJson(result);
 }
 
@@ -620,22 +735,25 @@ function printHelp(): void {
       "Commands:",
       "  harbor init <repo-path> [--name <name>] [--data-dir <dir>] [--policy-preset <name>]",
       "  harbor caps [--data-dir <dir>] [--policy-preset <name>]",
-      "  harbor call <session-id> <capability> [--input '<json>'] [--grant <effectClass[:targetId]>] [--policy-preset <name>]",
+      "  harbor call <session-id> <capability> [--input '<json>'] [--grant <effectClass[:targetId]>] [--approve-scope <once|task|session>] [--task-id <id>] [--policy-preset <name>]",
       "  harbor read <session-id> <path> [--repo] [--policy-preset <name>]",
       "  harbor write <session-id> <path> --content '<text>' [--policy-preset <name>]",
       "  harbor delete <session-id> <path> [--file] [--policy-preset <name>]",
       "  harbor changes <session-id> [--policy-preset <name>]",
       "  harbor diff <session-id> [--policy-preset <name>]",
-      "  harbor test <session-id> <adapter> [--timeout-ms <ms>] [--approve] [--policy-preset <name>]",
-      "  harbor run <session-id> [--code '<js>'] [--file <path>] [--timeout-ms <ms>] [--approve-publish] [--approve-adapter <name>] [--policy-preset <name>]",
+      "  harbor test <session-id> <adapter> [--timeout-ms <ms>] [--approve] [--approve-scope <once|task|session>] [--task-id <id>] [--policy-preset <name>]",
+      "  harbor run <session-id> [--code '<js>'] [--file <path>] [--timeout-ms <ms>] [--approve-publish] [--approve-adapter <name>] [--approve-scope <once|task|session>] [--task-id <id>] [--policy-preset <name>]",
       "  harbor review <session-id> [--policy-preset <name>]",
       "  harbor discard <session-id> [paths...] [--policy-preset <name>]",
       "  harbor reject <session-id> --reason '<text>' [--policy-preset <name>]",
       "  harbor revise <session-id> --note '<text>' [--policy-preset <name>]",
-      "  harbor publish <session-id> [--approve] [--yes] [--policy-preset <name>]",
+      "  harbor publish <session-id> [--approve] [--approve-scope <once|task|session>] [--task-id <id>] [--yes] [--policy-preset <name>]",
+      "  harbor approvals list <session-id> [--include-inactive]",
+      "  harbor approvals revoke <session-id> (--grant-id <id> | --task-id <task> | --all) [--reason <text>]",
       "  harbor pi [repo-path] [--repo <path>] [--data-dir <dir>] [--approved-adapters <csv>] [--policy-preset <name>] [--keep-default-tools] [-- <pi args>]",
       "",
       "Policy presets: permissive, balanced, strict",
+      "Approval scopes: once, task, session (via --approve-scope)",
       "Environment: OPENHARBOR_POLICY_PRESET=<name>",
     ].join("\n") + "\n",
   );
@@ -708,7 +826,7 @@ function printReviewBundle(
 
   const paths = Array.isArray(preview.paths) ? preview.paths.filter((p) => typeof p === "string") : [];
   process.stdout.write("\nPublish Intent:\n");
-  process.stdout.write(`  Publish ${changeCount} file change(s) to repo`);
+  process.stdout.write(`  Publish draft changes (${changeCount} file change(s)) to repository`);
   if (paths.length > 0) {
     process.stdout.write(`: ${paths.join(", ")}`);
   }
@@ -720,6 +838,10 @@ function toRecord(value: unknown): Record<string, unknown> {
     return {};
   }
   return value as Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function fail(message: string): never {
