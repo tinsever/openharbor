@@ -262,6 +262,57 @@ describe("Harbor integration", () => {
     });
   });
 
+  it("supports permissive, balanced, and strict policy presets for test execution", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const permissiveEnv = createHarborEnvironment({
+        dataDir: path.join(dataDir, "permissive"),
+        policyPreset: "permissive",
+      });
+      const permissiveSession = await permissiveEnv.sessions.createSession(repo);
+      const permissiveRun = (await permissiveEnv.invoke(
+        permissiveSession.id,
+        "tests.run",
+        { adapter: "pnpm-test", args: ["--version"] },
+      )) as { ok: boolean };
+      expect(permissiveRun.ok).toBe(true);
+
+      const balancedEnv = createHarborEnvironment({
+        dataDir: path.join(dataDir, "balanced"),
+        policyPreset: "balanced",
+      });
+      const balancedSession = await balancedEnv.sessions.createSession(repo);
+      await expect(
+        balancedEnv.invoke(
+          balancedSession.id,
+          "tests.run",
+          { adapter: "pnpm-test", args: ["--version"] },
+        ),
+      ).rejects.toThrow(ApprovalRequiredError);
+
+      const balancedApprovedRun = (await balancedEnv.invoke(
+        balancedSession.id,
+        "tests.run",
+        { adapter: "pnpm-test", args: ["--version"] },
+        { approvedAdapters: new Set(["pnpm-test"]) },
+      )) as { ok: boolean };
+      expect(balancedApprovedRun.ok).toBe(true);
+
+      const strictEnv = createHarborEnvironment({
+        dataDir: path.join(dataDir, "strict"),
+        policyPreset: "strict",
+      });
+      const strictSession = await strictEnv.sessions.createSession(repo);
+      await expect(
+        strictEnv.invoke(
+          strictSession.id,
+          "tests.run",
+          { adapter: "pnpm-test", args: ["--version"] },
+          { approvedAdapters: new Set(["pnpm-test"]) },
+        ),
+      ).rejects.toThrow(ApprovalRequiredError);
+    });
+  });
+
   it("publishes overlay changes to repo only when granted approval", async () => {
     await withTempRepo(async ({ repo, dataDir }) => {
       const env = createHarborEnvironment(dataDir);
