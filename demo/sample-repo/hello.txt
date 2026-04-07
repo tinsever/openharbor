@@ -1,0 +1,2 @@
+Hello from the demo repository.
+This file is read-only to the agent runtime; drafts go through the overlay.
