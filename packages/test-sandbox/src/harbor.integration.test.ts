@@ -466,6 +466,119 @@ describe("Harbor integration", () => {
     });
   });
 
+  it("persists session and task grants across host restarts", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const envA = createHarborEnvironment(dataDir);
+      const session = await envA.sessions.createSession(repo);
+
+      await envA.invoke(session.id, "workspace.writeFile", {
+        path: "hello.txt",
+        content: "session-1\n",
+      });
+      await envA.invoke(
+        session.id,
+        "publish.apply",
+        {},
+        {
+          approvalGrants: [{ scope: "session", effectClass: "publish.repo", targetId: "repo" }],
+        },
+      );
+
+      const envB = createHarborEnvironment(dataDir);
+      await envB.invoke(session.id, "workspace.writeFile", {
+        path: "hello.txt",
+        content: "session-2\n",
+      });
+      await envB.invoke(session.id, "publish.apply", {});
+
+      await envB.invoke(session.id, "workspace.writeFile", {
+        path: "hello.txt",
+        content: "task-1\n",
+      });
+      await envB.invoke(session.id, "approvals.revoke", { all: true });
+      await envB.invoke(
+        session.id,
+        "publish.apply",
+        {},
+        {
+          taskId: "persisted-task",
+          approvalGrants: [{ scope: "task", effectClass: "publish.repo", targetId: "repo" }],
+        },
+      );
+
+      const envC = createHarborEnvironment(dataDir);
+      await envC.invoke(session.id, "workspace.writeFile", {
+        path: "hello.txt",
+        content: "task-2\n",
+      });
+      await envC.invoke(session.id, "publish.apply", {}, { taskId: "persisted-task" });
+      await expect(
+        envC.invoke(session.id, "publish.apply", {}, { taskId: "different-task" }),
+      ).rejects.toThrow(ApprovalRequiredError);
+    });
+  });
+
+  it("lists and revokes grants through capabilities", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+
+      await env.invoke(
+        session.id,
+        "publish.apply",
+        {},
+        {
+          taskId: "task-1",
+          approvalGrants: [
+            { scope: "session", effectClass: "publish.repo", targetId: "repo" },
+            { scope: "task", effectClass: "publish.repo", targetId: "repo" },
+          ],
+        },
+      );
+
+      const listed = (await env.invoke(session.id, "approvals.list", {})) as {
+        grants: Array<{ id: string; scope: string; status: string; taskId?: string }>;
+      };
+      const sessionGrant = listed.grants.find((g) => g.scope === "session");
+      const taskGrant = listed.grants.find((g) => g.scope === "task" && g.taskId === "task-1");
+      expect(sessionGrant).toBeTruthy();
+      expect(taskGrant).toBeTruthy();
+
+      const revokeTask = (await env.invoke(session.id, "approvals.revoke", {
+        taskId: "task-1",
+        reason: "task done",
+      })) as { revokedCount: number };
+      expect(revokeTask.revokedCount).toBeGreaterThanOrEqual(1);
+
+      const revokeOne = (await env.invoke(session.id, "approvals.revoke", {
+        grantId: sessionGrant!.id,
+      })) as { revokedCount: number };
+      expect(revokeOne.revokedCount).toBe(1);
+
+      const after = (await env.invoke(session.id, "approvals.list", {
+        includeInactive: false,
+      })) as { grants: Array<{ id: string }> };
+      expect(after.grants).toEqual([]);
+    });
+  });
+
+  it("requires taskId for task-scoped approval grants", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+
+      await env.invoke(session.id, "workspace.writeFile", {
+        path: "hello.txt",
+        content: "needs-task-id\n",
+      });
+      await expect(
+        env.invoke(session.id, "publish.apply", {}, {
+          approvalGrants: [{ scope: "task", effectClass: "publish.repo", targetId: "repo" }],
+        }),
+      ).rejects.toThrow(ValidationError);
+    });
+  });
+
   it("rejects malformed capability input via schema validation", async () => {
     await withTempRepo(async ({ repo, dataDir }) => {
       const env = createHarborEnvironment(dataDir);
