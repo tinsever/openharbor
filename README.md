@@ -8,6 +8,40 @@ It keeps model code constrained, routes side effects through typed capabilities,
 
 OpenHarbor is experimental v0 software intended for local development and testing.
 
+## Why Harbor
+
+When Harbor is done, the goal is simple: let agents do real engineering work with high leverage, without giving them ambient machine authority.
+
+### Philosophy
+
+- Authority should be explicit, typed, and reviewable.
+- Draft work should be cheap and reversible.
+- Publish should be intentional, human-approved, and auditable.
+- Safety should come from architecture, not from hoping prompts are followed.
+
+### Why use Harbor instead of just-bash?
+
+`just-bash` is fast and flexible, but it gives agents broad authority by default. One bad command or prompt-injection hit can mutate the wrong thing immediately.
+
+Harbor shifts that model:
+
+- agents call capabilities instead of arbitrary shell
+- changes land in an overlay first
+- risky effects are policy-gated
+- publish requires approval
+- every step is logged to an audit trail
+
+So you trade a little raw convenience for much better control and traceability.
+
+### Harbor vs `sm`
+
+If `sm` is shell-first agent execution, Harbor is policy-first agent execution.
+
+- `sm`: optimize for speed and unconstrained tool access
+- Harbor: optimize for controlled authority, reviewability, and safer default behavior
+
+Harbor is for teams that want agent automation to scale without turning every run into a trust fall.
+
 ## What it does
 
 - Constrained runtime for model-authored task code
