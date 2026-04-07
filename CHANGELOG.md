@@ -8,6 +8,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Added
+
+## [0.1.0] - 2026-04-08
+
+### Added
 - CI workflow for build, lint, test, and demo smoke.
 - Release guardrails workflow for tagged releases.
 - Release checklist and process guide.
