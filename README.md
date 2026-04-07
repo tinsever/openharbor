@@ -46,6 +46,7 @@ Harbor is for teams that want agent automation to scale without turning every ru
 
 - Constrained runtime for model-authored task code
 - Policy-gated capability host (`allow`, `deny`, `allow_with_limits`, `require_approval`)
+- Built-in policy presets: `permissive`, `balanced`, `strict`
 - Overlay workspace for draft edits before publish
 - Local session store for artifacts, test runs, and audit logs
 - CLI workflow for inspect → draft → test → review → publish
@@ -86,6 +87,12 @@ pnpm test
 | `pnpm demo` | Run demo workflow in `demo/` |
 | `pnpm harbor` | Run Harbor CLI |
 
+## Policy presets
+
+- `permissive`: repo reads, draft edits, artifacts, and test adapters are allowed by default; publish still requires approval
+- `balanced`: same defaults, but test adapters must be in the approved adapter set or explicitly approved
+- `strict`: same defaults, but every test adapter run requires explicit approval even if the adapter is otherwise approved
+
 ## Quick start (API)
 
 ```ts
@@ -101,6 +108,15 @@ await env.invoke(session.id, "workspace.writeFile", {
 });
 
 const preview = await env.invoke(session.id, "publish.preview", {});
+```
+
+You can choose a preset when creating the environment:
+
+```ts
+const env = createHarborEnvironment({
+  dataDir: "/tmp/openharbor-data",
+  policyPreset: "strict",
+});
 ```
 
 ## Quick start (CLI)
@@ -119,6 +135,13 @@ pnpm harbor delete <session-id> packages
 pnpm harbor diff <session-id>
 pnpm harbor test <session-id> pnpm-test --approve
 pnpm harbor publish <session-id> --approve --yes
+```
+
+Preset selection is available in the CLI too:
+
+```bash
+pnpm harbor init ./demo/sample-repo --policy-preset strict
+OPENHARBOR_POLICY_PRESET=permissive pnpm harbor test <session-id> pnpm-test
 ```
 
 ## Runtime and safety model
