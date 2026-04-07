@@ -18,6 +18,9 @@ export const policyEvaluationRecordSchema = z.object({
   reason: z.string().optional(),
   limits: z.record(z.unknown()).optional(),
   approvalIntent: z.string().optional(),
+  nextAction: z.string().optional(),
+  grantScopeHint: grantScopeSchema.optional(),
+  targetLabel: z.string().optional(),
 });
 
 export type PolicyEvaluationRecord = z.infer<typeof policyEvaluationRecordSchema>;

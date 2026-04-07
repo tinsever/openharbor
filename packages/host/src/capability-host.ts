@@ -15,12 +15,14 @@ import {
 import type { PolicyContext, PolicyEngine } from "@openharbor/policy";
 import type { OverlayWorkspace } from "@openharbor/overlay";
 import type { LocalHarborStore } from "./local-store.js";
+import type { SessionManager } from "./session-manager.js";
 import { makeAuditEvent } from "./audit.js";
 
 export interface InvokeContext {
   session: SessionRecord;
   overlay: OverlayWorkspace;
   store: LocalHarborStore;
+  sessions: SessionManager;
   policyContext: PolicyContext;
   persistWorkspace: () => Promise<void>;
   consumeApprovalGrantOnce?: (grantKey: string) => Promise<void>;
@@ -175,6 +177,10 @@ export class CapabilityHost {
         effectClass: effect.effectClass,
         decision: record.decision,
         reason: record.reason,
+        approvalIntent: record.approvalIntent,
+        nextAction: record.nextAction,
+        grantScopeHint: record.grantScopeHint,
+        targetLabel: record.targetLabel,
       },
     });
   }

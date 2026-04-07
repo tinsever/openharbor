@@ -83,6 +83,16 @@ const defaultApprovalIntent = (effect: CapabilityEffectMeta, target: ResourceTar
   return `${effect.effectClass} on ${target.id}`;
 };
 
+const defaultNextAction = (effect: CapabilityEffectMeta): string => {
+  if (effect.effectClass === "publish.repo") {
+    return "Review draft changes, then grant publish approval with the intended scope.";
+  }
+  if (effect.effectClass === "execute.adapter") {
+    return "Approve this adapter run for once, task, or session scope.";
+  }
+  return "Request explicit approval for this effect before retrying.";
+};
+
 /**
  * Ordered rules; first non-null evaluation wins.
  */
@@ -146,6 +156,8 @@ export function createPolicyPresetRules(preset: PolicyPresetName): PolicyRule[] 
             grantScope: grant.scope,
             grantKey: grant.key,
           },
+          grantScopeHint: grant.scope,
+          targetLabel: target.id,
         };
       },
     },
@@ -201,6 +213,9 @@ export function createPolicyPresetRules(preset: PolicyPresetName): PolicyRule[] 
               ? "strict preset requires approval for all adapter execution"
               : "adapter not in approved set",
           approvalIntent: defaultApprovalIntent(effect, target),
+          nextAction: defaultNextAction(effect),
+          targetLabel: target.id,
+          grantScopeHint: "once",
         };
       },
     },
@@ -213,6 +228,9 @@ export function createPolicyPresetRules(preset: PolicyPresetName): PolicyRule[] 
         return {
           decision: "require_approval",
           approvalIntent: defaultApprovalIntent(effect, target),
+          nextAction: defaultNextAction(effect),
+          targetLabel: target.path ?? target.id,
+          grantScopeHint: "once",
         };
       },
     },
@@ -222,6 +240,8 @@ export function createPolicyPresetRules(preset: PolicyPresetName): PolicyRule[] 
         return {
           decision: "deny",
           reason: `effect ${effect.effectClass} not permitted by default for target ${target.kind}:${target.id}`,
+          nextAction: "Use a capability with an allowed effect class or adjust policy preset/rules.",
+          targetLabel: `${target.kind}:${target.id}`,
         };
       },
     },

@@ -12,6 +12,8 @@ export const auditEventTypeSchema = z.enum([
   "capability.result",
   "policy.evaluation",
   "approval.granted",
+  "approval.used",
+  "approval.revoked",
   "overlay.mutated",
   "review.revised",
   "review.discarded",

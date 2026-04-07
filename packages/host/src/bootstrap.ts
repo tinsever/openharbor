@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { ValidationError } from "@openharbor/core";
 import type { ApprovalGrant } from "@openharbor/policy";
-import { approvalGrantKey } from "@openharbor/policy";
 import {
   createPolicyEngine,
   resolvePolicyPreset,
@@ -191,46 +191,67 @@ async function invokeCapability(
   policyOverrides?: InvokePolicyOverrides,
 ): Promise<unknown> {
   const bundle = await sessions.getBundle(sessionId);
-  const onceGrantKeys = new Set<string>();
   for (const grant of policyOverrides?.approvalGrants ?? []) {
-    const key = approvalGrantKey(grant.effectClass, grant.targetId ?? "*");
+    if (grant.scope === "task" && !policyOverrides?.taskId) {
+      throw new ValidationError(
+        "Task-scoped approval grant requires taskId",
+        { scope: grant.scope, effectClass: grant.effectClass, targetId: grant.targetId ?? "*" },
+      );
+    }
+    const targetId = grant.targetId ?? "*";
+    const issued = sessions.issueApprovalGrant({
+      sessionId,
+      scope: grant.scope,
+      effectClass: grant.effectClass,
+      targetId,
+      taskId: grant.scope === "task" ? policyOverrides?.taskId : undefined,
+    });
+    await sessions.persistApprovalGrants(sessionId);
     await sessions.store.appendAudit(
       sessionId,
       makeAuditEvent(sessionId, "approval.granted", {
+        grantId: issued.id,
         scope: grant.scope,
         effectClass: grant.effectClass,
-        targetId: grant.targetId ?? null,
+        targetId,
         taskId: policyOverrides?.taskId ?? null,
+        status: issued.status,
       }),
     );
-    if (grant.scope === "once") {
-      onceGrantKeys.add(key);
-      continue;
-    }
-    if (grant.scope === "task") {
-      if (!policyOverrides?.taskId) {
-        continue;
-      }
-      sessions.addTaskApprovalGrant(sessionId, policyOverrides.taskId, key);
-      continue;
-    }
-    sessions.addSessionApprovalGrant(sessionId, key);
   }
+
+  const grantKeySets = sessions.getPolicyGrantKeySets(sessionId, policyOverrides?.taskId);
 
   const ctx: InvokeContext = {
     session: bundle.session,
     overlay: bundle.overlay,
     store: sessions.store,
+    sessions,
     policyContext: {
       sessionId,
       approvedAdapters: policyOverrides?.approvedAdapters ?? new Set(),
-      approvalGrantsOnce: onceGrantKeys,
-      approvalGrantsTask: sessions.getTaskApprovalGrants(sessionId, policyOverrides?.taskId),
-      approvalGrantsSession: sessions.getSessionApprovalGrants(sessionId),
+      approvalGrantsOnce: grantKeySets.approvalGrantsOnce,
+      approvalGrantsTask: grantKeySets.approvalGrantsTask,
+      approvalGrantsSession: grantKeySets.approvalGrantsSession,
     },
     persistWorkspace: () => sessions.persistOverlay(sessionId),
     consumeApprovalGrantOnce: async (grantKey: string) => {
-      onceGrantKeys.delete(grantKey);
+      const consumed = sessions.consumeOnceGrantByKey(sessionId, grantKey);
+      if (!consumed) {
+        return;
+      }
+      await sessions.persistApprovalGrants(sessionId);
+      await sessions.store.appendAudit(
+        sessionId,
+        makeAuditEvent(sessionId, "approval.used", {
+          grantId: consumed.id,
+          scope: consumed.scope,
+          effectClass: consumed.effectClass,
+          targetId: consumed.targetId,
+          taskId: consumed.taskId ?? null,
+          status: consumed.status,
+        }),
+      );
     },
   };
   return capabilities.invoke(capabilityName, input, ctx);

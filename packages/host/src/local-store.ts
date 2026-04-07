@@ -1,8 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import type { AuditEvent, OverlayPersistedState, SessionRecord } from "@openharbor/schemas";
+import type {
+  ApprovalGrantRecord,
+  AuditEvent,
+  OverlayPersistedState,
+  SessionRecord,
+} from "@openharbor/schemas";
 import {
+  approvalGrantRecordSchema,
   auditEventSchema,
   sessionRecordSchema,
   sessionSnapshotSchema,
@@ -71,6 +77,10 @@ export class LocalHarborStore {
 
   private auditPath(sessionId: string): string {
     return path.join(this.sessionPath(sessionId), "audit.jsonl");
+  }
+
+  private approvalsPath(sessionId: string): string {
+    return path.join(this.sessionPath(sessionId), "approvals.json");
   }
 
   async saveSession(record: SessionRecord): Promise<void> {
@@ -330,6 +340,31 @@ export class LocalHarborStore {
     } catch {
       return [];
     }
+  }
+
+  async loadApprovalGrants(sessionId: string): Promise<ApprovalGrantRecord[]> {
+    const file = this.approvalsPath(sessionId);
+    try {
+      const raw = JSON.parse(await fs.readFile(file, "utf8"));
+      if (!Array.isArray(raw)) {
+        return [];
+      }
+      return raw
+        .map((item) => approvalGrantRecordSchema.parse(item))
+        .sort((a, b) => a.issuedAt.localeCompare(b.issuedAt));
+    } catch {
+      return [];
+    }
+  }
+
+  async saveApprovalGrants(
+    sessionId: string,
+    grants: ApprovalGrantRecord[],
+  ): Promise<void> {
+    const dir = this.sessionPath(sessionId);
+    await ensureDir(dir);
+    const parsed = grants.map((grant) => approvalGrantRecordSchema.parse(grant));
+    await fs.writeFile(this.approvalsPath(sessionId), JSON.stringify(parsed, null, 2), "utf8");
   }
 
   private async readAuditLines(sessionId: string): Promise<string[]> {

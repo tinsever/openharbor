@@ -884,6 +884,107 @@ export function registerBuiltinCapabilities(host: CapabilityHost): void {
   });
 
   host.register({
+    name: "approvals.list",
+    description: "List approval grants issued for this Harbor session",
+    effect: { effectClass: "read.artifact" },
+    input: z.object({
+      includeInactive: z.boolean().default(true),
+    }),
+    output: z.object({
+      grants: z.array(
+        z.object({
+          id: z.string().uuid(),
+          scope: z.enum(["once", "task", "session"]),
+          effectClass: z.string(),
+          targetId: z.string(),
+          taskId: z.string().optional(),
+          status: z.enum(["active", "consumed", "revoked"]),
+          issuedAt: z.string(),
+          consumedAt: z.string().optional(),
+          revokedAt: z.string().optional(),
+          reason: z.string().optional(),
+        }),
+      ),
+    }),
+    resolveTarget: (_input, session) => ({
+      kind: "session" as const,
+      id: session.id,
+    }),
+    handler: async (input, ctx) => {
+      const grants = ctx.sessions.listApprovalGrants(ctx.session.id, {
+        includeInactive: input.includeInactive ?? true,
+      });
+      return { grants };
+    },
+  });
+
+  host.register({
+    name: "approvals.revoke",
+    description: "Revoke active approval grants by id, task, or entire session",
+    effect: { effectClass: "write.artifact" },
+    input: z
+      .object({
+        grantId: z.string().uuid().optional(),
+        taskId: z.string().optional(),
+        all: z.boolean().optional(),
+        reason: z.string().optional(),
+      })
+      .superRefine((input, issue) => {
+        const selectors = [input.grantId ? 1 : 0, input.taskId ? 1 : 0, input.all ? 1 : 0].reduce(
+          (sum, item) => sum + item,
+          0,
+        );
+        if (selectors !== 1) {
+          issue.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Exactly one of grantId, taskId, or all=true must be provided",
+          });
+        }
+      }),
+    output: z.object({
+      revokedCount: z.number().int().nonnegative(),
+      grantIds: z.array(z.string().uuid()),
+    }),
+    resolveTarget: (_input, session) => ({
+      kind: "session" as const,
+      id: session.id,
+    }),
+    handler: async (input, ctx) => {
+      let revoked = [] as Array<{ id: string }>;
+      if (input.grantId) {
+        const hit = ctx.sessions.revokeApprovalGrant(ctx.session.id, input.grantId, input.reason);
+        revoked = hit ? [{ id: hit.id }] : [];
+      } else if (input.taskId) {
+        revoked = ctx.sessions
+          .revokeApprovalGrantsByTask(ctx.session.id, input.taskId, input.reason)
+          .map((grant) => ({ id: grant.id }));
+      } else if (input.all) {
+        revoked = ctx.sessions
+          .revokeAllApprovalGrants(ctx.session.id, input.reason)
+          .map((grant) => ({ id: grant.id }));
+      }
+
+      if (revoked.length > 0) {
+        await ctx.sessions.persistApprovalGrants(ctx.session.id);
+        for (const grant of revoked) {
+          await ctx.store.appendAudit(
+            ctx.session.id,
+            makeAuditEvent(ctx.session.id, "approval.revoked", {
+              grantId: grant.id,
+              reason: input.reason ?? null,
+            }),
+          );
+        }
+      }
+
+      return {
+        revokedCount: revoked.length,
+        grantIds: revoked.map((grant) => grant.id),
+      };
+    },
+  });
+
+  host.register({
     name: "publish.preview",
     description: "Summarize what would be published (does not mutate the repo)",
     effect: { effectClass: "read.draft" },
