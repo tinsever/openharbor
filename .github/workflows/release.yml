@@ -1,0 +1,49 @@
+name: Release Guardrails
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  guardrails:
+    name: Validate tagged release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Verify CHANGELOG entry exists for tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          if ! grep -Eq "^## \[$VERSION\]" CHANGELOG.md; then
+            echo "Missing CHANGELOG.md entry for version $VERSION"
+            exit 1
+          fi
+
+      - name: Verify release checklist exists
+        run: test -f RELEASE.md
