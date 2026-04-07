@@ -23,6 +23,7 @@ const TOOL_NAMES = [
 function buildState(pi: ExtensionAPI): HarborRuntimeState {
   const configuredDataDir = getStringFlag(pi, "harbor-data-dir");
   const adaptersCsv = getStringFlag(pi, "harbor-approved-adapters");
+  const policyPreset = getStringFlag(pi, "harbor-policy-preset");
 
   const approvedAdapters = adaptersCsv
     ? adaptersCsv
@@ -34,6 +35,7 @@ function buildState(pi: ExtensionAPI): HarborRuntimeState {
   const bridge = new PiHarborBridge({
     dataDir: configuredDataDir,
     approvedAdapters,
+    policyPreset,
   });
 
   return {
@@ -128,6 +130,11 @@ export default function harborPiExtension(pi: ExtensionAPI): void {
     description: "Comma-separated approved Harbor test adapter names",
     type: "string",
     default: "pnpm-test",
+  });
+  pi.registerFlag("harbor-policy-preset", {
+    description: "Harbor policy preset: permissive, balanced, or strict",
+    type: "string",
+    default: "balanced",
   });
 
   const runtime: { state?: HarborRuntimeState } = {};

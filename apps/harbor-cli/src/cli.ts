@@ -5,8 +5,11 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import type { ApprovalGrant } from "@openharbor/pi-integration";
-import { PiHarborBridge } from "@openharbor/pi-integration";
+import {
+  PiHarborBridge,
+  resolvePolicyPreset,
+  type ApprovalGrant,
+} from "@openharbor/pi-integration";
 
 interface ParsedArgs {
   _: string[];
@@ -23,7 +26,8 @@ async function main(): Promise<void> {
   }
 
   const dataDir = getStringOption(parsed.options, "data-dir");
-  const bridge = new PiHarborBridge({ dataDir });
+  const policyPreset = getPolicyPresetOption(parsed.options);
+  const bridge = new PiHarborBridge({ dataDir, policyPreset });
 
   switch (command) {
     case "init":
@@ -441,6 +445,7 @@ async function cmdPi(
   const dataDir = getStringOption(options, "data-dir")
     ?? path.join(resolvedRepo, ".harbor-data");
   const approvedAdapters = getStringOption(options, "approved-adapters") ?? "pnpm-test";
+  const policyPreset = getPolicyPresetOption(options);
 
   const piArgs: string[] = [];
   if (!options["keep-default-tools"]) {
@@ -455,6 +460,8 @@ async function cmdPi(
     dataDir,
     "--harbor-approved-adapters",
     approvedAdapters,
+    "--harbor-policy-preset",
+    policyPreset,
     ...passthrough,
   );
 
@@ -574,6 +581,13 @@ function parseGrants(values: string[]): ApprovalGrant[] {
   return grants;
 }
 
+function getPolicyPresetOption(
+  options: Record<string, string | boolean | string[]>,
+): ReturnType<typeof resolvePolicyPreset> {
+  const raw = getStringOption(options, "policy-preset") ?? process.env.OPENHARBOR_POLICY_PRESET;
+  return resolvePolicyPreset(raw);
+}
+
 async function loadCodeFromFlags(
   options: Record<string, string | boolean | string[]>,
 ): Promise<string | undefined> {
@@ -604,22 +618,25 @@ function printHelp(): void {
       "Harbor CLI",
       "",
       "Commands:",
-      "  harbor init <repo-path> [--name <name>] [--data-dir <dir>]",
-      "  harbor caps [--data-dir <dir>]",
-      "  harbor call <session-id> <capability> [--input '<json>'] [--grant <effectClass[:targetId]>]",
-      "  harbor read <session-id> <path> [--repo]",
-      "  harbor write <session-id> <path> --content '<text>'",
-      "  harbor delete <session-id> <path> [--file]",
-      "  harbor changes <session-id>",
-      "  harbor diff <session-id>",
-      "  harbor test <session-id> <adapter> [--timeout-ms <ms>] [--approve]",
-      "  harbor run <session-id> [--code '<js>'] [--file <path>] [--timeout-ms <ms>] [--approve-publish] [--approve-adapter <name>]",
-      "  harbor review <session-id>",
-      "  harbor discard <session-id> [paths...]",
-      "  harbor reject <session-id> --reason '<text>'",
-      "  harbor revise <session-id> --note '<text>'",
-      "  harbor publish <session-id> [--approve] [--yes]",
-      "  harbor pi [repo-path] [--repo <path>] [--data-dir <dir>] [--approved-adapters <csv>] [--keep-default-tools] [-- <pi args>]",
+      "  harbor init <repo-path> [--name <name>] [--data-dir <dir>] [--policy-preset <name>]",
+      "  harbor caps [--data-dir <dir>] [--policy-preset <name>]",
+      "  harbor call <session-id> <capability> [--input '<json>'] [--grant <effectClass[:targetId]>] [--policy-preset <name>]",
+      "  harbor read <session-id> <path> [--repo] [--policy-preset <name>]",
+      "  harbor write <session-id> <path> --content '<text>' [--policy-preset <name>]",
+      "  harbor delete <session-id> <path> [--file] [--policy-preset <name>]",
+      "  harbor changes <session-id> [--policy-preset <name>]",
+      "  harbor diff <session-id> [--policy-preset <name>]",
+      "  harbor test <session-id> <adapter> [--timeout-ms <ms>] [--approve] [--policy-preset <name>]",
+      "  harbor run <session-id> [--code '<js>'] [--file <path>] [--timeout-ms <ms>] [--approve-publish] [--approve-adapter <name>] [--policy-preset <name>]",
+      "  harbor review <session-id> [--policy-preset <name>]",
+      "  harbor discard <session-id> [paths...] [--policy-preset <name>]",
+      "  harbor reject <session-id> --reason '<text>' [--policy-preset <name>]",
+      "  harbor revise <session-id> --note '<text>' [--policy-preset <name>]",
+      "  harbor publish <session-id> [--approve] [--yes] [--policy-preset <name>]",
+      "  harbor pi [repo-path] [--repo <path>] [--data-dir <dir>] [--approved-adapters <csv>] [--policy-preset <name>] [--keep-default-tools] [-- <pi args>]",
+      "",
+      "Policy presets: permissive, balanced, strict",
+      "Environment: OPENHARBOR_POLICY_PRESET=<name>",
     ].join("\n") + "\n",
   );
 }

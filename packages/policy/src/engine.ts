@@ -65,6 +65,10 @@ export interface PolicyRule {
   ): PolicyEvaluationRecord | null;
 }
 
+export const policyPresetNames = ["permissive", "balanced", "strict"] as const;
+
+export type PolicyPresetName = (typeof policyPresetNames)[number];
+
 const defaultApprovalIntent = (effect: CapabilityEffectMeta, target: ResourceTarget): string => {
   if (effect.effectClass === "publish.repo") {
     const p = target.path ?? target.id;
@@ -103,8 +107,21 @@ export class PolicyEngine {
   }
 }
 
+export function resolvePolicyPreset(input?: string | null): PolicyPresetName {
+  const normalized = input?.trim().toLowerCase();
+  if (!normalized) {
+    return "balanced";
+  }
+  if ((policyPresetNames as readonly string[]).includes(normalized)) {
+    return normalized as PolicyPresetName;
+  }
+  throw new Error(
+    `Unknown Harbor policy preset "${input}". Expected one of: ${policyPresetNames.join(", ")}`,
+  );
+}
+
 /** Baseline policy for local development: read repo/draft by default, gate tests and publish via approval flow. */
-export function createDefaultPolicyRules(): PolicyRule[] {
+export function createPolicyPresetRules(preset: PolicyPresetName): PolicyRule[] {
   return [
     {
       id: "deny-destructive",
@@ -171,12 +188,18 @@ export function createDefaultPolicyRules(): PolicyRule[] {
         if (target.kind !== "adapter") {
           return { decision: "deny", reason: "adapter target required" };
         }
-        if (ctx.approvedAdapters.has(target.id)) {
+        if (preset === "permissive") {
+          return { decision: "allow" };
+        }
+        if (preset === "balanced" && ctx.approvedAdapters.has(target.id)) {
           return { decision: "allow" };
         }
         return {
           decision: "require_approval",
-          reason: "adapter not in approved set",
+          reason:
+            preset === "strict"
+              ? "strict preset requires approval for all adapter execution"
+              : "adapter not in approved set",
           approvalIntent: defaultApprovalIntent(effect, target),
         };
       },
@@ -205,8 +228,16 @@ export function createDefaultPolicyRules(): PolicyRule[] {
   ];
 }
 
+export function createPolicyEngine(preset: PolicyPresetName = "balanced"): PolicyEngine {
+  return new PolicyEngine(createPolicyPresetRules(preset));
+}
+
+export function createDefaultPolicyRules(): PolicyRule[] {
+  return createPolicyPresetRules("balanced");
+}
+
 export function createDefaultPolicyEngine(): PolicyEngine {
-  return new PolicyEngine(createDefaultPolicyRules());
+  return createPolicyEngine("balanced");
 }
 
 /** Map effect class to a minimal capability effect meta for policy tests */

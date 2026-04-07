@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { ApprovalGrant } from "@openharbor/policy";
 import { approvalGrantKey } from "@openharbor/policy";
-import { createDefaultPolicyEngine } from "@openharbor/policy";
+import {
+  createPolicyEngine,
+  resolvePolicyPreset,
+  type PolicyPresetName,
+} from "@openharbor/policy";
 import { createHarborRuntime, type HarborRuntimeLimits } from "@openharbor/runtime";
 import { defaultDataDir } from "./paths.js";
 import { LocalHarborStore } from "./local-store.js";
@@ -52,9 +56,20 @@ export interface RunModelTaskResult {
   truncatedOutput: boolean;
 }
 
-export function createHarborEnvironment(dataDir: string = defaultDataDir()): HarborEnvironment {
+export interface HarborEnvironmentOptions {
+  dataDir?: string;
+  policyPreset?: PolicyPresetName | string;
+}
+
+export function createHarborEnvironment(
+  options: string | HarborEnvironmentOptions = {},
+): HarborEnvironment {
+  const resolvedOptions = normalizeEnvironmentOptions(options);
+  const dataDir = resolvedOptions.dataDir ?? defaultDataDir();
+  const policyPreset = resolvePolicyPreset(resolvedOptions.policyPreset);
+
   const store = new LocalHarborStore({ dataDir });
-  const policy = createDefaultPolicyEngine();
+  const policy = createPolicyEngine(policyPreset);
   const sessions = new SessionManager(store);
   const capabilities = new CapabilityHost(policy, store);
   const runtime = createHarborRuntime();
@@ -70,6 +85,15 @@ export function createHarborEnvironment(dataDir: string = defaultDataDir()): Har
     runModelTask: (sessionId, code, options) =>
       runModelTask(sessions, capabilities, runtime, sessionId, code, options),
   };
+}
+
+function normalizeEnvironmentOptions(
+  options: string | HarborEnvironmentOptions,
+): HarborEnvironmentOptions {
+  if (typeof options === "string") {
+    return { dataDir: options };
+  }
+  return options;
 }
 
 async function runModelTask(

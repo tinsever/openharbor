@@ -1,4 +1,8 @@
-import type { ApprovalGrant } from "@openharbor/policy";
+import {
+  resolvePolicyPreset,
+  type ApprovalGrant,
+  type PolicyPresetName,
+} from "@openharbor/policy";
 import { ApprovalRequiredError, PolicyDeniedError, ValidationError } from "@openharbor/core";
 import {
   createHarborEnvironment,
@@ -11,9 +15,11 @@ import {
 export interface PiIntegrationOptions {
   dataDir?: string;
   approvedAdapters?: Iterable<string>;
+  policyPreset?: PolicyPresetName | string;
 }
 
-export type { ApprovalGrant } from "@openharbor/policy";
+export { resolvePolicyPreset } from "@openharbor/policy";
+export type { ApprovalGrant, PolicyPresetName } from "@openharbor/policy";
 
 export interface InvokeRequest {
   sessionId: string;
@@ -80,7 +86,10 @@ export class PiHarborBridge {
   private readonly approvedAdapters: Set<string>;
 
   constructor(opts: PiIntegrationOptions = {}) {
-    this.env = createHarborEnvironment(opts.dataDir);
+    this.env = createHarborEnvironment({
+      dataDir: opts.dataDir,
+      policyPreset: resolvePolicyPreset(opts.policyPreset),
+    });
     this.approvedAdapters = new Set(opts.approvedAdapters ?? []);
   }
 
