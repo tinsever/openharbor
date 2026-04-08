@@ -32,6 +32,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Validate capability packs
+        run: pnpm validate:capability-packs
+
       - name: Test
         run: pnpm test
 

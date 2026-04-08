@@ -15,7 +15,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"process.exit(0)\""
+    "test": "node -e \"process.exit(0)\"",
+    "validate:packs": "tsc -p tsconfig.json && node dist/validate-capability-packs.js"
   },
   "dependencies": {
     "@openharbor/core": "workspace:*",
