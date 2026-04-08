@@ -220,4 +220,4 @@ Pi support remains available as a compatibility surface, but it is no longer Har
 
 ## License
 
-ISC
+[ISC](./LICENSE) Tin Sever
