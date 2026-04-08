@@ -1,3 +1,6 @@
+# HELP! I'M STUCK!
+Read my blog post on this here: https://www.tin-sever.de/blog/bash-successor
+
 # OpenHarbor
 
 Use `Claude Code`, `Codex`, and `Cursor` on your real machine without giving them raw shell.
