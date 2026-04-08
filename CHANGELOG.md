@@ -8,6 +8,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Added
+- `harbor review --json` machine-readable review bundle and `--verbose` diff detail mode.
+- CLI UX validation doc for top 10 end-to-end command flows.
+
+### Changed
+- Unified CLI help output from a single command usage catalog with core-flow examples.
+- Added CLI error taxonomy metadata and remediation guidance across usage, validation, approval, and denial outcomes.
+- Improved inspect -> draft -> test -> review -> publish messaging with explicit `Next:` guidance.
+- Added integration coverage for review/publish UX and taxonomy metadata, including Pi bridge parity checks.
 
 ## [0.1.0] - 2026-04-08
 
