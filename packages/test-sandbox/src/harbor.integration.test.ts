@@ -1,8 +1,11 @@
 import { access, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { ApprovalRequiredError, ValidationError } from "@openharbor/core";
 import { createHarborEnvironment } from "@openharbor/host";
@@ -12,6 +15,7 @@ import { evalInTestSandbox } from "./vm-sandbox.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const adversarialFixtureDir = path.resolve(__dirname, "../fixtures/adversarial-repo");
+const runExecFile = promisify(execFile);
 
 async function withTempRepo(
   fn: (paths: { repo: string; dataDir: string }) => Promise<void>,
@@ -30,6 +34,54 @@ async function withTempRepo(
 
 async function seedAdversarialFixture(repo: string): Promise<void> {
   await cp(adversarialFixtureDir, repo, { recursive: true, force: true });
+}
+
+async function runHarborCli(
+  args: string[],
+  cwd: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const cliPath = path.resolve(__dirname, "../../../apps/harbor-cli/dist/cli.js");
+  const out = await runExecFile("node", [cliPath, ...args], {
+    cwd,
+    env: process.env,
+  });
+  return {
+    stdout: out.stdout,
+    stderr: out.stderr,
+  };
+}
+
+function parseLastJsonObject(stdout: string): Record<string, unknown> {
+  const marker = stdout.indexOf("{");
+  if (marker < 0) {
+    throw new Error(`No JSON object found in stdout: ${stdout}`);
+  }
+  const jsonText = stdout.slice(marker);
+  return JSON.parse(jsonText) as Record<string, unknown>;
+}
+
+function hashLegacyAuditRecord(input: {
+  id: string;
+  ts: string;
+  sessionId: string;
+  type: string;
+  payload: Record<string, unknown>;
+  prevHash: string | null;
+}): string {
+  const canonical = stableStringify(input);
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
 }
 
 describe("Harbor integration", () => {
@@ -709,6 +761,51 @@ describe("Harbor integration", () => {
       const types = events.map((e) => e.type);
       expect(types).toContain("session.created");
       expect(types.filter((t) => t === "capability.call").length).toBeGreaterThan(0);
+      expect(events.every((event) => event.schemaVersion === 1)).toBe(true);
+    });
+  });
+
+  it("reads legacy unversioned audit events and normalizes schemaVersion", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+      const auditPath = path.join(dataDir, "sessions", session.id, "audit.jsonl");
+      const text = await readFile(auditPath, "utf8");
+      const firstLine = text.split("\n").find(Boolean);
+      expect(firstLine).toBeTruthy();
+
+      const parsed = JSON.parse(firstLine!) as Record<string, unknown>;
+      const { schemaVersion: _dropSchemaVersion, ...legacyLine } = parsed;
+      const legacyPayload = (legacyLine.payload ?? {}) as Record<string, unknown>;
+      const { __integrity: _dropIntegrity, ...legacyPayloadWithoutIntegrity } = legacyPayload;
+      const legacyHash = hashLegacyAuditRecord({
+        id: String(legacyLine.id),
+        ts: String(legacyLine.ts),
+        sessionId: String(legacyLine.sessionId),
+        type: String(legacyLine.type),
+        payload: legacyPayloadWithoutIntegrity,
+        prevHash: null,
+      });
+      const rewrittenLegacyLine = {
+        ...legacyLine,
+        payload: {
+          ...legacyPayloadWithoutIntegrity,
+          __integrity: {
+            algo: "sha256",
+            prevHash: null,
+            hash: legacyHash,
+          },
+        },
+      };
+      const legacyText = `${JSON.stringify(rewrittenLegacyLine)}\n`;
+      await writeFile(auditPath, legacyText, "utf8");
+
+      const events = await env.store.readAudit(session.id);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.schemaVersion).toBe(1);
+
+      const verify = await env.store.verifyAuditIntegrity(session.id);
+      expect(verify.ok).toBe(true);
     });
   });
 
@@ -729,7 +826,150 @@ describe("Harbor integration", () => {
 
       const after = await env.store.verifyAuditIntegrity(session.id);
       expect(after.ok).toBe(false);
+      expect(after.failureCode).toBe("hash_mismatch");
       expect(after.reason).toMatch(/mismatch|invalid/i);
+    });
+  });
+
+  it("classifies audit integrity failures by tamper mode", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(path.join(dataDir, "base"));
+      const session = await env.sessions.createSession(repo);
+      await env.invoke(session.id, "repo.readFile", { path: "hello.txt" });
+      await env.invoke(session.id, "repo.readFile", { path: "hello.txt" });
+      const auditPath = path.join(dataDir, "base", "sessions", session.id, "audit.jsonl");
+      const lines = (await readFile(auditPath, "utf8")).split("\n").filter(Boolean);
+      expect(lines.length).toBeGreaterThan(1);
+
+      const parseEnv = createHarborEnvironment(path.join(dataDir, "parse"));
+      const parseSession = await parseEnv.sessions.createSession(repo);
+      const parsePath = path.join(dataDir, "parse", "sessions", parseSession.id, "audit.jsonl");
+      await writeFile(parsePath, "not-json\n", "utf8");
+      const parseReport = await parseEnv.store.verifyAuditIntegrity(parseSession.id);
+      expect(parseReport.ok).toBe(false);
+      expect(parseReport.failureCode).toBe("parse_error");
+
+      const missingEnv = createHarborEnvironment(path.join(dataDir, "missing"));
+      const missingSession = await missingEnv.sessions.createSession(repo);
+      const missingPath = path.join(dataDir, "missing", "sessions", missingSession.id, "audit.jsonl");
+      const missingLine = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
+      const payload = (missingLine.payload ?? {}) as Record<string, unknown>;
+      const { __integrity: _drop, ...payloadWithoutIntegrity } = payload;
+      await writeFile(
+        missingPath,
+        `${JSON.stringify({ ...missingLine, payload: payloadWithoutIntegrity })}\n`,
+        "utf8",
+      );
+      const missingReport = await missingEnv.store.verifyAuditIntegrity(missingSession.id);
+      expect(missingReport.ok).toBe(false);
+      expect(missingReport.failureCode).toBe("missing_integrity");
+
+      const chainEnv = createHarborEnvironment(path.join(dataDir, "chain"));
+      const chainSession = await chainEnv.sessions.createSession(repo);
+      const chainPath = path.join(dataDir, "chain", "sessions", chainSession.id, "audit.jsonl");
+      const shifted = [...lines.slice(1), lines[0]].join("\n");
+      await writeFile(chainPath, `${shifted}\n`, "utf8");
+      const chainReport = await chainEnv.store.verifyAuditIntegrity(chainSession.id);
+      expect(chainReport.ok).toBe(false);
+      expect(chainReport.failureCode).toBe("chain_mismatch");
+
+      const hashEnv = createHarborEnvironment(path.join(dataDir, "hash"));
+      const hashSession = await hashEnv.sessions.createSession(repo);
+      const hashPath = path.join(dataDir, "hash", "sessions", hashSession.id, "audit.jsonl");
+      await writeFile(hashPath, `${lines.join("\n").replace("repo.readFile", "repo.readFile.tampered")}\n`, "utf8");
+      const hashReport = await hashEnv.store.verifyAuditIntegrity(hashSession.id);
+      expect(hashReport.ok).toBe(false);
+      expect(hashReport.failureCode).toBe("hash_mismatch");
+    });
+  });
+
+  it("records artifact references in capability.result audit payloads for tests.run", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+      const run = (await env.invoke(
+        session.id,
+        "tests.run",
+        { adapter: "pnpm-test", args: ["--version"] },
+        { approvedAdapters: new Set(["pnpm-test"]) },
+      )) as {
+        runId: string;
+        stdoutArtifactId?: string;
+        stderrArtifactId?: string;
+      };
+      const events = await env.store.readAudit(session.id);
+      const resultEvent = [...events]
+        .reverse()
+        .find((event) => event.type === "capability.result" && event.payload.capabilityName === "tests.run");
+      expect(resultEvent).toBeTruthy();
+      expect(resultEvent?.payload.runId).toBe(run.runId);
+      const refs = Array.isArray(resultEvent?.payload.artifactRefs)
+        ? (resultEvent?.payload.artifactRefs as unknown[])
+        : [];
+      if (run.stdoutArtifactId) {
+        expect(refs).toContain(run.stdoutArtifactId);
+      }
+      if (run.stderrArtifactId) {
+        expect(refs).toContain(run.stderrArtifactId);
+      }
+    });
+  });
+
+  it("supports CLI audit inspect/search/replay flows", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+      await env.invoke(session.id, "repo.readFile", { path: "hello.txt" });
+      await env.invoke(
+        session.id,
+        "tests.run",
+        { adapter: "pnpm-test", args: ["--version"] },
+        { approvedAdapters: new Set(["pnpm-test"]) },
+      );
+
+      const inspectOut = await runHarborCli(
+        ["audit", "inspect", session.id, "--data-dir", dataDir, "--type", "capability.call", "--limit", "2", "--verify"],
+        repo,
+      );
+      const inspectJson = JSON.parse(inspectOut.stdout) as {
+        returnedEvents: number;
+        events: Array<{ type: string }>;
+        integrity?: { ok: boolean };
+      };
+      expect(inspectJson.returnedEvents).toBeGreaterThan(0);
+      expect(inspectJson.events.every((event) => event.type === "capability.call")).toBe(true);
+      expect(inspectJson.integrity?.ok).toBe(true);
+
+      const searchOut = await runHarborCli(
+        ["audit", "search", session.id, "--data-dir", dataDir, "--query", "tests.run"],
+        repo,
+      );
+      const searchJson = JSON.parse(searchOut.stdout) as {
+        matchCount: number;
+        matches: Array<{ payload: { capabilityName?: string } }>;
+      };
+      expect(searchJson.matchCount).toBeGreaterThan(0);
+      expect(searchJson.matches.some((m) => m.payload.capabilityName === "tests.run")).toBe(true);
+
+      const replayOut = await runHarborCli(
+        ["audit", "replay", session.id, "--data-dir", dataDir],
+        repo,
+      );
+      expect(replayOut.stdout).toContain("Replay Summary");
+      const replayJson = parseLastJsonObject(replayOut.stdout) as {
+        timeline: {
+          modelRuns: { total: number };
+          approvals: { granted: number };
+          publish: { applied: number };
+          capabilityCalls: Array<{ capabilityName: string; count: number }>;
+        };
+      };
+      expect(replayJson.timeline.modelRuns.total).toBeGreaterThanOrEqual(0);
+      expect(replayJson.timeline.approvals.granted).toBeGreaterThanOrEqual(0);
+      expect(replayJson.timeline.publish.applied).toBeGreaterThanOrEqual(0);
+      expect(
+        replayJson.timeline.capabilityCalls.some((entry) => entry.capabilityName === "tests.run"),
+      ).toBe(true);
     });
   });
 
