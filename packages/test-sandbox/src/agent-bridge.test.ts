@@ -12,8 +12,16 @@ async function withTempRepo(
   const repo = path.join(root, "repo");
   const dataDir = path.join(root, "data");
   await mkdir(repo, { recursive: true });
+  await mkdir(path.join(repo, ".git"), { recursive: true });
+  await mkdir(path.join(repo, "node_modules/pkg"), { recursive: true });
+  await mkdir(path.join(repo, "dist"), { recursive: true });
+  await mkdir(path.join(repo, "src"), { recursive: true });
   await writeFile(path.join(repo, "hello.txt"), "base\n", "utf8");
   await writeFile(path.join(repo, "README.md"), "hello world\nhello harbor\n", "utf8");
+  await writeFile(path.join(repo, "src/index.ts"), "export const indexValue = 'source';\n", "utf8");
+  await writeFile(path.join(repo, "dist/index.js"), "console.log('built');\n", "utf8");
+  await writeFile(path.join(repo, "node_modules/pkg/index.js"), "module.exports = 'pkg';\n", "utf8");
+  await writeFile(path.join(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages/mcp-server:\n", "utf8");
   await fn({ repo, dataDir });
 }
 
@@ -26,6 +34,8 @@ describe("HarborAgentBridge", () => {
       if (globalGuide.status !== "ok") {
         return;
       }
+      expect(globalGuide.data.phase).toBe("start");
+      expect(globalGuide.data.primaryAction.tool).toBe("harbor_list_sessions");
       expect(globalGuide.data.suggestedCalls.some((call) => call.tool === "harbor_open_session")).toBe(true);
 
       const opened = await bridge.openSession({ repoPath: repo, name: "test-session" });
@@ -35,7 +45,9 @@ describe("HarborAgentBridge", () => {
       }
 
       const sessionId = opened.data.id;
+      expect(opened.data.guide.phase).toBe("inspect");
       expect(opened.data.guide.currentState.sessionId).toBe(sessionId);
+      expect(opened.data.guide.primaryAction.tool).toBe("harbor_list_tree");
       expect(opened.data.guide.suggestedCalls.some((call) => call.tool === "harbor_list_tree")).toBe(true);
       const adapters = await bridge.listTestAdapters({ sessionId });
       expect(adapters.status).toBe("ok");
@@ -49,13 +61,68 @@ describe("HarborAgentBridge", () => {
       if (emptyGuide.status !== "ok") {
         return;
       }
+      expect(emptyGuide.data.phase).toBe("inspect");
       expect(emptyGuide.data.currentState.draftChangeCount).toBe(0);
+
+      const startHere = await bridge.startHere({ repoPath: repo });
+      expect(startHere.status).toBe("ok");
+      if (startHere.status !== "ok") {
+        return;
+      }
+      expect(startHere.data.scope).toBe("session");
+      expect(startHere.data.currentState.sessionId).toBe(sessionId);
+
+      const tree = await bridge.listRepoTree({ sessionId, path: ".", maxDepth: 2 });
+      expect(tree.status).toBe("ok");
+      if (tree.status !== "ok") {
+        return;
+      }
+      expect(tree.data.tree).toContain("src");
+      expect(tree.data.tree).not.toContain(".git");
+      expect(tree.data.tree).not.toContain("node_modules");
+      expect(tree.data.tree).not.toContain("dist");
 
       const read = await bridge.readRepoFile({ sessionId, path: "hello.txt" });
       expect(read).toMatchObject({
         status: "ok",
-        data: { content: "base\n" },
+        data: {
+          path: "hello.txt",
+          content: "base\n",
+          startLine: 1,
+          endLine: 1,
+          totalLines: 1,
+          returnedLineCount: 1,
+          truncated: false,
+        },
       });
+
+      await writeFile(
+        path.join(repo, "long.txt"),
+        Array.from({ length: 60 }, (_, index) => `line ${index + 1}\n`).join(""),
+        "utf8",
+      );
+      const chunkedRead = await bridge.readRepoFile({
+        sessionId,
+        path: "long.txt",
+        startLine: 21,
+        maxLines: 20,
+      });
+      expect(chunkedRead).toMatchObject({
+        status: "ok",
+        data: {
+          path: "long.txt",
+          startLine: 21,
+          endLine: 40,
+          totalLines: 60,
+          returnedLineCount: 20,
+          truncated: true,
+          nextStartLine: 41,
+        },
+      });
+      if (chunkedRead.status === "ok") {
+        expect(chunkedRead.data.content.startsWith("line 21\n")).toBe(true);
+        expect(chunkedRead.data.content.endsWith("line 40\n")).toBe(true);
+      }
 
       const search = await bridge.searchRepo({ sessionId, query: "hello" });
       expect(search.status).toBe("ok");
@@ -68,6 +135,15 @@ describe("HarborAgentBridge", () => {
         firstMatchLineNumber: 1,
       });
       expect(search.data.suggestedPaths).toContain("README.md");
+
+      const sourceSearch = await bridge.searchRepo({ sessionId, query: "indexValue" });
+      expect(sourceSearch.status).toBe("ok");
+      if (sourceSearch.status !== "ok") {
+        return;
+      }
+      expect(sourceSearch.data.files[0]?.path).toBe("src/index.ts");
+      expect(sourceSearch.data.files.some((file) => file.path.includes("node_modules"))).toBe(false);
+      expect(sourceSearch.data.files.some((file) => file.path.includes("dist"))).toBe(false);
 
       const write = await bridge.writeDraftFile({
         sessionId,
@@ -109,6 +185,8 @@ describe("HarborAgentBridge", () => {
       if (draftGuide.status !== "ok") {
         return;
       }
+      expect(draftGuide.data.phase).toBe("validate");
+      expect(draftGuide.data.primaryAction.tool).toBe("harbor_diff");
       expect(draftGuide.data.currentState.draftChangeCount).toBe(1);
       expect(draftGuide.data.currentState.lastTestStatus).toBe("not_run");
 

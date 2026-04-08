@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { ValidationError } from "@openharbor/core";
 import type { ApprovalGrant } from "@openharbor/policy";
@@ -92,8 +93,7 @@ export function createHarborEnvironment(
       if (!repoPath) {
         return sessionsList;
       }
-      const normalized = repoPath.trim();
-      return sessionsList.filter((session) => session.repoPath === normalized);
+      return filterSessionsForRepoPath(sessionsList, repoPath);
     },
     getSessionOverview: (sessionId) => getSessionOverview(sessions, store, sessionId),
     invoke: (sessionId, capabilityName, input, policyOverrides) =>
@@ -101,6 +101,40 @@ export function createHarborEnvironment(
     runModelTask: (sessionId, code, options) =>
       runModelTask(sessions, capabilities, runtime, sessionId, code, options),
   };
+}
+
+async function filterSessionsForRepoPath(
+  sessions: SessionRecord[],
+  repoPath: string,
+): Promise<SessionRecord[]> {
+  const normalized = repoPath.trim();
+  const targetRealPath = await safeRealpath(normalized);
+  const matches = await Promise.all(sessions.map(async (session) => {
+    if (session.repoPath === normalized) {
+      return true;
+    }
+    if (!targetRealPath) {
+      return false;
+    }
+    return safePathEquals(session.repoPath, targetRealPath);
+  }));
+  return sessions.filter((_session, index) => matches[index] === true);
+}
+
+async function safeRealpath(candidatePath: string): Promise<string | null> {
+  try {
+    return await fs.realpath(candidatePath);
+  } catch {
+    return null;
+  }
+}
+
+async function safePathEquals(sessionPath: string, targetRealPath: string): Promise<boolean> {
+  try {
+    return await fs.realpath(sessionPath) === targetRealPath;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeEnvironmentOptions(

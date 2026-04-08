@@ -28,6 +28,108 @@ function toRepoRelative(repoRoot: string, abs: string): string {
   return rel.split(path.sep).join("/");
 }
 
+const REPO_NOISE_SEGMENTS = new Set([
+  ".git",
+  ".harbor-data",
+  ".pnpm-store",
+  ".turbo",
+  ".next",
+  ".cache",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
+
+const SOURCE_FILE_EXTENSIONS = new Set([
+  ".c",
+  ".cc",
+  ".cpp",
+  ".css",
+  ".go",
+  ".h",
+  ".html",
+  ".java",
+  ".js",
+  ".json",
+  ".jsx",
+  ".mjs",
+  ".py",
+  ".rb",
+  ".rs",
+  ".sh",
+  ".sql",
+  ".ts",
+  ".tsx",
+  ".vue",
+  ".yaml",
+  ".yml",
+]);
+
+const PRIORITY_DIR_SEGMENTS = new Set([
+  "app",
+  "apps",
+  "api",
+  "client",
+  "clients",
+  "lib",
+  "libs",
+  "package",
+  "packages",
+  "server",
+  "services",
+  "src",
+  "web",
+]);
+
+function isRepoNoisePath(repoRelativePath: string): boolean {
+  const normalized = repoRelativePath.replace(/\\/g, "/");
+  if (normalized === "." || normalized === "") {
+    return false;
+  }
+  return normalized.split("/").filter(Boolean).some((segment) => REPO_NOISE_SEGMENTS.has(segment));
+}
+
+function shouldHideRepoEntry(parentPath: string, entryPath: string): boolean {
+  if (isRepoNoisePath(parentPath)) {
+    return false;
+  }
+  return isRepoNoisePath(entryPath);
+}
+
+function scoreRepoTraversalPath(repoRelativePath: string, query: string, isDirectory: boolean): number {
+  const normalized = repoRelativePath.replace(/\\/g, "/");
+  const lower = normalized.toLowerCase();
+  const queryLower = query.toLowerCase();
+  const base = path.posix.basename(normalized).toLowerCase();
+  const ext = path.posix.extname(normalized).toLowerCase();
+  const segments = normalized.split("/").filter(Boolean);
+  let score = isDirectory ? 25 : 0;
+
+  if (!isRepoNoisePath(normalized)) {
+    score += 100;
+  }
+  if (lower.includes(queryLower)) {
+    score += 70;
+  }
+  if (base === queryLower || lower.endsWith(`/${queryLower}`)) {
+    score += 60;
+  }
+  if (segments.some((segment) => PRIORITY_DIR_SEGMENTS.has(segment.toLowerCase()))) {
+    score += 45;
+  }
+  if (!isDirectory && SOURCE_FILE_EXTENSIONS.has(ext)) {
+    score += 20;
+  }
+  if (base === "package.json" || base === "readme.md") {
+    score += 10;
+  }
+  if (base === "pnpm-lock.yaml" || lower.endsWith(".log")) {
+    score -= 80;
+  }
+
+  return score;
+}
+
 const TEST_ADAPTERS: Record<string, { command: string; args: string[]; description: string }> = {
   "pnpm-test": {
     command: "pnpm",
@@ -332,8 +434,10 @@ export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDes
           };
         }),
       );
-      out.sort((a, b) => a.path.localeCompare(b.path));
-      return { entries: out };
+      const visible = out
+        .filter((entry) => !shouldHideRepoEntry(relPath, entry.path))
+        .sort((a, b) => a.path.localeCompare(b.path));
+      return { entries: visible };
     },
   });
 
@@ -378,7 +482,7 @@ export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDes
       path: z.string().default("."),
       caseSensitive: z.boolean().default(false),
       maxResults: z.number().int().positive().max(1_000).default(100),
-      maxFiles: z.number().int().positive().max(10_000).default(2_000),
+      maxFiles: z.number().int().positive().max(10_000).default(5_000),
       maxFileSizeBytes: z.number().int().positive().max(5_000_000).default(256_000),
     }),
     output: z.object({
@@ -400,21 +504,74 @@ export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDes
     handler: async (input, ctx: InvokeContext) => {
       const relPath = input.path ?? ".";
       const maxResults = input.maxResults ?? 100;
-      const maxFiles = input.maxFiles ?? 2_000;
+      const maxFiles = input.maxFiles ?? 5_000;
       const maxFileSizeBytes = input.maxFileSizeBytes ?? 256_000;
       const root = resolveUnderRepo(ctx.session.repoPath, relPath);
-      const stack = [root];
       const matches: Array<{ path: string; lineNumber: number; line: string }> = [];
       let scannedFiles = 0;
       let truncated = false;
       const needle = input.caseSensitive ? input.query : input.query.toLowerCase();
+      const rootStat = await fs.stat(root);
+      const rootRepoPath = toRepoRelative(ctx.session.repoPath, root);
+      const stack = rootStat.isDirectory() ? [root] : [];
+
+      const scanFile = async (abs: string): Promise<void> => {
+        const repoFilePath = toRepoRelative(ctx.session.repoPath, abs);
+        if (isRepoNoisePath(repoFilePath) && !isRepoNoisePath(rootRepoPath)) {
+          return;
+        }
+        const stat = await fs.stat(abs);
+        if (stat.size > maxFileSizeBytes) {
+          return;
+        }
+
+        const raw = await fs.readFile(abs);
+        if (raw.includes(0)) {
+          return;
+        }
+
+        scannedFiles += 1;
+        const text = raw.toString("utf8");
+        const lines = text.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i] ?? "";
+          const haystack = input.caseSensitive ? line : line.toLowerCase();
+          if (!haystack.includes(needle)) {
+            continue;
+          }
+          matches.push({
+            path: repoFilePath,
+            lineNumber: i + 1,
+            line,
+          });
+          if (matches.length >= maxResults) {
+            truncated = true;
+            break;
+          }
+        }
+      };
+
+      if (rootStat.isFile()) {
+        await scanFile(root);
+        return { matches, scannedFiles, truncated };
+      }
 
       while (stack.length > 0) {
         const current = stack.pop();
         if (!current) {
           continue;
         }
-        const entries = await fs.readdir(current, { withFileTypes: true });
+        const entries = (await fs.readdir(current, { withFileTypes: true }))
+          .sort((a, b) => {
+            const aPath = toRepoRelative(ctx.session.repoPath, path.join(current, a.name));
+            const bPath = toRepoRelative(ctx.session.repoPath, path.join(current, b.name));
+            const scoreDelta = scoreRepoTraversalPath(bPath, input.query, b.isDirectory())
+              - scoreRepoTraversalPath(aPath, input.query, a.isDirectory());
+            if (scoreDelta !== 0) {
+              return scoreDelta;
+            }
+            return a.name.localeCompare(b.name);
+          });
         for (const entry of entries) {
           if (matches.length >= maxResults || scannedFiles >= maxFiles) {
             truncated = true;
@@ -426,42 +583,17 @@ export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDes
             continue;
           }
           if (entry.isDirectory()) {
+            const repoDirPath = toRepoRelative(ctx.session.repoPath, abs);
+            if (isRepoNoisePath(repoDirPath) && !isRepoNoisePath(rootRepoPath)) {
+              continue;
+            }
             stack.push(abs);
             continue;
           }
           if (!entry.isFile()) {
             continue;
           }
-
-          const stat = await fs.stat(abs);
-          if (stat.size > maxFileSizeBytes) {
-            continue;
-          }
-
-          const raw = await fs.readFile(abs);
-          if (raw.includes(0)) {
-            continue;
-          }
-
-          scannedFiles += 1;
-          const text = raw.toString("utf8");
-          const lines = text.split(/\r?\n/);
-          for (let i = 0; i < lines.length; i += 1) {
-            const line = lines[i] ?? "";
-            const haystack = input.caseSensitive ? line : line.toLowerCase();
-            if (!haystack.includes(needle)) {
-              continue;
-            }
-            matches.push({
-              path: toRepoRelative(ctx.session.repoPath, abs),
-              lineNumber: i + 1,
-              line,
-            });
-            if (matches.length >= maxResults) {
-              truncated = true;
-              break;
-            }
-          }
+          await scanFile(abs);
         }
         if (truncated) {
           break;

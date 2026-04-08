@@ -28,6 +28,19 @@ Use the exact `command` and `args` from the generated output.
 
 ## Missing session id
 
+If the client is unsure where to start, call:
+
+```bash
+harbor_get_guide
+```
+
+Or scope it to a repo/session:
+
+```bash
+harbor_get_guide {"repoPath":"/path/to/repo"}
+harbor_get_guide {"sessionId":"<session-id>"}
+```
+
 List local sessions:
 
 ```bash
@@ -45,6 +58,28 @@ If you do not have a session yet, create one from the client with `harbor_open_s
 ```bash
 pnpm harbor init /path/to/repo
 ```
+
+## Large file reads
+
+If a file view is clipped in the MCP text output, request an explicit window instead of assuming you saw the full file:
+
+```bash
+harbor_read_file {"sessionId":"<session-id>","path":"README.md","startLine":1,"maxLines":80}
+harbor_read_draft {"sessionId":"<session-id>","path":"README.md","startLine":81,"maxLines":80}
+```
+
+Harbor now reports the returned line range, total line count, and the next suggested chunk.
+
+## Broad search truncation
+
+If `harbor_search_repo` says the scan was truncated, retry with a narrower `path`:
+
+```bash
+harbor_search_repo {"sessionId":"<session-id>","query":"mcp","path":"packages"}
+harbor_search_repo {"sessionId":"<session-id>","query":"mcp","path":"apps"}
+```
+
+Root searches still work, but Harbor will now suggest narrower paths when the result set is too broad.
 
 ## Approval loop
 
@@ -87,6 +122,12 @@ OPENHARBOR_POLICY_PRESET=strict pnpm harbor review <session-id>
 ```
 
 ## Adapter approval confusion
+
+List valid MCP-facing Harbor adapters first:
+
+```bash
+harbor_list_test_adapters {"sessionId":"<session-id>"}
+```
 
 List test adapters:
 

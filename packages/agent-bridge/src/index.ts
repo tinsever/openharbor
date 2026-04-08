@@ -98,11 +98,24 @@ export interface PublishPreview {
   };
 }
 
+export interface FileReadResult {
+  path: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  returnedLineCount: number;
+  truncated: boolean;
+  nextStartLine?: number;
+}
+
 export interface OpenSessionSummary extends SessionSummary {
   guide: HarborWorkflowGuide;
 }
 
 export interface RepoSearchResult {
+  query: string;
+  searchPath: string;
   matches: Array<{ path: string; lineNumber: number; line: string }>;
   scannedFiles: number;
   truncated: boolean;
@@ -113,6 +126,7 @@ export interface RepoSearchResult {
     firstMatchLine: string;
   }>;
   suggestedPaths: string[];
+  recommendedScopes: string[];
 }
 
 export interface TestAdapterSummary {
@@ -130,8 +144,10 @@ export interface HarborSuggestedToolCall {
 
 export interface HarborWorkflowGuide {
   scope: "global" | "repo" | "session";
+  phase: "start" | "resume" | "inspect" | "draft" | "validate" | "repair" | "publish";
   summary: string;
   recommendedNextStep: string;
+  whyThisStep: string;
   currentState: {
     repoPath?: string;
     sessionId?: string;
@@ -143,7 +159,9 @@ export interface HarborWorkflowGuide {
     activeApprovalCount?: number;
     availableAdapters?: string[];
   };
+  primaryAction: HarborSuggestedToolCall;
   suggestedCalls: HarborSuggestedToolCall[];
+  checklist: string[];
   approvalFlow: {
     summary: string;
     steps: string[];
@@ -248,8 +266,41 @@ export class HarborAgentBridge {
     return this.ok(buildGlobalWorkflowGuide());
   }
 
-  async readRepoFile(input: { sessionId: string; path: string }): Promise<BridgeResult<{ content: string }>> {
-    return this.invoke("repo.readFile", input.sessionId, { path: input.path }, "file");
+  async startHere(input: {
+    sessionId?: string;
+    repoPath?: string;
+  }): Promise<BridgeResult<HarborWorkflowGuide>> {
+    if (input.sessionId) {
+      return this.getWorkflowGuide(input);
+    }
+
+    if (input.repoPath) {
+      const repoPath = path.resolve(input.repoPath);
+      const sessions = await this.env.listSessions(repoPath);
+      if (sessions.length === 1) {
+        return this.getWorkflowGuide({ sessionId: sessions[0]!.id });
+      }
+      return this.ok(buildRepoWorkflowGuide(repoPath, sessions));
+    }
+
+    const sessions = await this.env.listSessions();
+    if (sessions.length === 1) {
+      return this.getWorkflowGuide({ sessionId: sessions[0]!.id });
+    }
+    return this.ok(buildGlobalWorkflowGuide());
+  }
+
+  async readRepoFile(input: {
+    sessionId: string;
+    path: string;
+    startLine?: number;
+    maxLines?: number;
+  }): Promise<BridgeResult<FileReadResult>> {
+    const result = await this.invoke<{ content: string }>("repo.readFile", input.sessionId, { path: input.path }, "file");
+    if (result.status !== "ok") {
+      return result;
+    }
+    return this.ok(sliceFileContent(input.path, result.data.content, input.startLine, input.maxLines));
   }
 
   async listRepoTree(input: {
@@ -313,23 +364,49 @@ export class HarborAgentBridge {
       });
     }
 
-    const files = [...fileMap.values()]
+    let files = [...fileMap.values()]
       .sort((a, b) => {
+        const scoreDelta = scoreRepoSearchPath(b.path, input.query, b.matchCount)
+          - scoreRepoSearchPath(a.path, input.query, a.matchCount);
+        if (scoreDelta !== 0) {
+          return scoreDelta;
+        }
         if (b.matchCount !== a.matchCount) {
           return b.matchCount - a.matchCount;
         }
         return a.path.localeCompare(b.path);
       });
 
+    const visibleFiles = files.filter((file) => !isRepoNoisePath(file.path));
+    if (visibleFiles.length > 0) {
+      files = visibleFiles;
+    }
+
+    const visiblePaths = new Set(files.map((file) => file.path));
+    const matches = result.data.matches.filter((match) => visiblePaths.has(match.path));
+
     return this.ok({
+      query: input.query,
+      searchPath: input.path ?? ".",
       ...result.data,
+      matches,
       files,
       suggestedPaths: files.slice(0, 3).map((file) => file.path),
+      recommendedScopes: collectSuggestedSearchScopes(files, input.path ?? "."),
     });
   }
 
-  async readDraftFile(input: { sessionId: string; path: string }): Promise<BridgeResult<{ content: string }>> {
-    return this.invoke("workspace.readFile", input.sessionId, { path: input.path }, "file");
+  async readDraftFile(input: {
+    sessionId: string;
+    path: string;
+    startLine?: number;
+    maxLines?: number;
+  }): Promise<BridgeResult<FileReadResult>> {
+    const result = await this.invoke<{ content: string }>("workspace.readFile", input.sessionId, { path: input.path }, "file");
+    if (result.status !== "ok") {
+      return result;
+    }
+    return this.ok(sliceFileContent(input.path, result.data.content, input.startLine, input.maxLines));
   }
 
   async writeDraftFile(input: {
@@ -670,9 +747,10 @@ export class HarborAgentBridge {
       return listed;
     }
 
-    for (let index = 0; index < listed.data.entries.length; index += 1) {
-      const entry = listed.data.entries[index];
-      const isLast = index === listed.data.entries.length - 1;
+    const entries = listed.data.entries.filter((entry) => !shouldHideTreeEntry(targetPath, entry.path));
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const isLast = index === entries.length - 1;
       lines.push(`${prefix}${isLast ? "\\-" : "|-"} ${entry.name}`);
       if (entry.type === "dir" && (maxDepth === undefined || depth + 1 < maxDepth)) {
         const nested = await this.appendRepoTreeLines(
@@ -790,6 +868,43 @@ export class HarborAgentBridge {
   }
 }
 
+const REPO_NOISE_SEGMENTS = new Set([
+  ".git",
+  ".harbor-data",
+  ".pnpm-store",
+  ".turbo",
+  ".next",
+  ".cache",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
+
+const SOURCE_FILE_EXTENSIONS = new Set([
+  ".c",
+  ".cc",
+  ".cpp",
+  ".css",
+  ".go",
+  ".h",
+  ".html",
+  ".java",
+  ".js",
+  ".json",
+  ".jsx",
+  ".mjs",
+  ".py",
+  ".rb",
+  ".rs",
+  ".sh",
+  ".sql",
+  ".ts",
+  ".tsx",
+  ".vue",
+  ".yaml",
+  ".yml",
+]);
+
 export function createHarborAgentBridge(options: HarborAgentBridgeOptions = {}): HarborAgentBridge {
   return new HarborAgentBridge(options);
 }
@@ -806,29 +921,39 @@ function toSessionSummary(session: SessionRecord): SessionSummary {
 }
 
 function buildGlobalWorkflowGuide(): HarborWorkflowGuide {
+  const suggestedCalls: HarborSuggestedToolCall[] = [
+    {
+      tool: "harbor_list_sessions",
+      arguments: {},
+      reason: "Resume prior work if a Harbor session already exists.",
+    },
+    {
+      tool: "harbor_open_session",
+      arguments: { repoPath: "/absolute/path/to/repo" },
+      reason: "Create a session for a repository when none exists yet.",
+    },
+    {
+      tool: "harbor_get_guide",
+      arguments: { sessionId: "<session-id>" },
+      reason: "Once you have a session, ask Harbor for the session-specific next step.",
+    },
+  ];
   return {
     scope: "global",
+    phase: "start",
     summary:
       "Harbor works best as a structured repo workflow: open or resume a session, inspect the repo, draft changes in the overlay, run tests, then publish with explicit approval.",
     recommendedNextStep:
       "Start by resuming an existing session with `harbor_list_sessions` or creating one with `harbor_open_session`.",
+    whyThisStep:
+      "Harbor cannot inspect or edit anything until work is anchored to a session, so the first UX decision is always resume versus create.",
     currentState: {},
-    suggestedCalls: [
-      {
-        tool: "harbor_list_sessions",
-        arguments: {},
-        reason: "Resume prior work if a Harbor session already exists.",
-      },
-      {
-        tool: "harbor_open_session",
-        arguments: { repoPath: "/absolute/path/to/repo" },
-        reason: "Create a session for a repository when none exists yet.",
-      },
-      {
-        tool: "harbor_get_guide",
-        arguments: { sessionId: "<session-id>" },
-        reason: "Once you have a session, ask Harbor for the session-specific next step.",
-      },
+    primaryAction: suggestedCalls[0]!,
+    suggestedCalls,
+    checklist: [
+      "If a relevant session already exists, resume it instead of creating another one.",
+      "If no session exists, create one with an absolute repository path.",
+      "After you have a session id, switch to the session-specific guide.",
     ],
     approvalFlow: buildApprovalFlow(),
   };
@@ -839,58 +964,78 @@ function buildRepoWorkflowGuide(
   sessions: SessionRecord[],
 ): HarborWorkflowGuide {
   if (sessions.length === 0) {
+    const suggestedCalls: HarborSuggestedToolCall[] = [
+      {
+        tool: "harbor_open_session",
+        arguments: { repoPath },
+        reason: "Create the first Harbor session for this repository.",
+      },
+      {
+        tool: "harbor_list_sessions",
+        arguments: { repoPath },
+        reason: "Re-check whether another client has already created a session.",
+      },
+    ];
     return {
       scope: "repo",
+      phase: "start",
       summary: "No Harbor session exists for this repository yet.",
       recommendedNextStep:
         "Create a Harbor session for this repo, then inspect the tree and start drafting changes in the overlay.",
+      whyThisStep:
+        "A repo-scoped request already tells Harbor where to work, so the shortest path is to create the session immediately.",
       currentState: {
         repoPath,
         existingSessionIds: [],
       },
-      suggestedCalls: [
-        {
-          tool: "harbor_open_session",
-          arguments: { repoPath },
-          reason: "Create the first Harbor session for this repository.",
-        },
-        {
-          tool: "harbor_list_sessions",
-          arguments: { repoPath },
-          reason: "Re-check whether another client has already created a session.",
-        },
+      primaryAction: suggestedCalls[0]!,
+      suggestedCalls,
+      checklist: [
+        "Create the session for this repository.",
+        "Use the returned session id for all subsequent Harbor calls.",
+        "Inspect the repo before writing into the draft overlay.",
       ],
       approvalFlow: buildApprovalFlow(),
     };
   }
 
   const latest = sessions[0]!;
+  const suggestedCalls: HarborSuggestedToolCall[] = [
+    {
+      tool: "harbor_open_session",
+      arguments: { sessionId: latest.id },
+      reason: "Resume the most recently updated session for this repository.",
+    },
+    {
+      tool: "harbor_get_guide",
+      arguments: { sessionId: latest.id },
+      reason: "See the next recommended Harbor action for the resumed session.",
+    },
+    {
+      tool: "harbor_list_sessions",
+      arguments: { repoPath },
+      reason: "Inspect all stored sessions if you need a different branch of work.",
+    },
+  ];
   return {
     scope: "repo",
+    phase: "resume",
     summary: `This repository already has ${sessions.length} Harbor session${sessions.length === 1 ? "" : "s"}.`,
     recommendedNextStep:
       "Resume the latest session instead of starting from scratch, then ask Harbor for the session-specific workflow guide.",
+    whyThisStep:
+      "Reusing the active session preserves draft state, test history, and approvals instead of fragmenting work across sessions.",
     currentState: {
       repoPath,
       existingSessionIds: sessions.map((session) => session.id),
       sessionId: latest.id,
     },
-    suggestedCalls: [
-      {
-        tool: "harbor_open_session",
-        arguments: { sessionId: latest.id },
-        reason: "Resume the most recently updated session for this repository.",
-      },
-      {
-        tool: "harbor_get_guide",
-        arguments: { sessionId: latest.id },
-        reason: "See the next recommended Harbor action for the resumed session.",
-      },
-      {
-        tool: "harbor_list_sessions",
-        arguments: { repoPath },
-        reason: "Inspect all stored sessions if you need a different branch of work.",
-      },
+    primaryAction: suggestedCalls[0]!,
+    suggestedCalls,
+    checklist: [
+      "Resume the latest session unless you have a reason to branch work.",
+      "Refresh the session-specific guide after opening it.",
+      "Only inspect the full session list if the latest one is not the right context.",
     ],
     approvalFlow: buildApprovalFlow(),
   };
@@ -915,33 +1060,43 @@ function buildSessionWorkflowGuide(
   };
 
   if (overview.draft.changeCount === 0) {
+    const suggestedCalls: HarborSuggestedToolCall[] = [
+      {
+        tool: "harbor_list_tree",
+        arguments: { sessionId: session.id, path: ".", maxDepth: 2 },
+        reason: "Explore the repo structure without shell access.",
+      },
+      {
+        tool: "harbor_search_repo",
+        arguments: { sessionId: session.id, query: "<symbol or text>", path: "." },
+        reason: "Find the exact files to inspect before editing.",
+      },
+      {
+        tool: "harbor_read_file",
+        arguments: { sessionId: session.id, path: "README.md" },
+        reason: "Read repository files through Harbor's repo-safe view.",
+      },
+      {
+        tool: "harbor_write_draft",
+        arguments: { sessionId: session.id, path: "<path>", content: "<updated content>" },
+        reason: "Stage changes in the draft overlay instead of mutating the repo directly.",
+      },
+    ];
     return {
       scope: "session",
+      phase: "inspect",
       summary: "This session has no pending draft changes.",
       recommendedNextStep:
         "Inspect the repository, read the relevant files, then write draft changes into the Harbor overlay.",
+      whyThisStep:
+        "With an empty draft, the main risk is editing the wrong file. Harbor should orient the agent before it stages changes.",
       currentState,
-      suggestedCalls: [
-        {
-          tool: "harbor_list_tree",
-          arguments: { sessionId: session.id, path: ".", maxDepth: 2 },
-          reason: "Explore the repo structure without shell access.",
-        },
-        {
-          tool: "harbor_search_repo",
-          arguments: { sessionId: session.id, query: "<symbol or text>", path: "." },
-          reason: "Find the exact files to inspect before editing.",
-        },
-        {
-          tool: "harbor_read_file",
-          arguments: { sessionId: session.id, path: "README.md" },
-          reason: "Read repository files through Harbor's repo-safe view.",
-        },
-        {
-          tool: "harbor_write_draft",
-          arguments: { sessionId: session.id, path: "<path>", content: "<updated content>" },
-          reason: "Stage changes in the draft overlay instead of mutating the repo directly.",
-        },
+      primaryAction: suggestedCalls[0]!,
+      suggestedCalls,
+      checklist: [
+        "Orient on the repo shape first.",
+        "Read the target file before editing it.",
+        "Write changes into the draft overlay, not directly into the repository.",
       ],
       approvalFlow: buildApprovalFlow(),
     };
@@ -989,43 +1144,62 @@ function buildSessionWorkflowGuide(
 
     return {
       scope: "session",
+      phase: "repair",
       summary: "This session has draft changes and the latest Harbor test run failed.",
       recommendedNextStep:
         "Read the failing test artifacts, update the draft, and re-run the relevant Harbor adapter before publish.",
+      whyThisStep:
+        "A failed validation run means publish is premature; the fastest safe move is to diagnose the failure and repair the draft.",
       currentState,
+      primaryAction: suggestedCalls[0]!,
       suggestedCalls,
+      checklist: [
+        "Inspect the failing diff and recent test run output.",
+        "Revise the draft to address the failure.",
+        "Re-run the most relevant Harbor adapter before returning to publish.",
+      ],
       approvalFlow: buildApprovalFlow(),
     };
   }
 
   if (lastTestStatus === "passed") {
+    const suggestedCalls: HarborSuggestedToolCall[] = [
+      {
+        tool: "harbor_diff",
+        arguments: { sessionId: session.id },
+        reason: "Review the exact draft diff before publish.",
+      },
+      {
+        tool: "harbor_publish_preview",
+        arguments: { sessionId: session.id },
+        reason: "Confirm which paths Harbor will publish from the overlay.",
+      },
+      {
+        tool: "harbor_publish_apply",
+        arguments: { sessionId: session.id },
+        reason: "Apply the reviewed draft into the repository once the user approves.",
+      },
+      {
+        tool: "harbor_list_approvals",
+        arguments: { sessionId: session.id, includeInactive: false },
+        reason: "Check whether a publish approval is already active for this session.",
+      },
+    ];
     return {
       scope: "session",
+      phase: "publish",
       summary: "This session has draft changes and the latest Harbor test run passed.",
       recommendedNextStep:
         "Review the diff, preview the publish set, then apply it. If Harbor asks for approval, call `harbor_grant_approval` and retry the publish tool.",
+      whyThisStep:
+        "Validation has passed, so Harbor should now focus the agent on a controlled review and publish sequence instead of more editing.",
       currentState,
-      suggestedCalls: [
-        {
-          tool: "harbor_diff",
-          arguments: { sessionId: session.id },
-          reason: "Review the exact draft diff before publish.",
-        },
-        {
-          tool: "harbor_publish_preview",
-          arguments: { sessionId: session.id },
-          reason: "Confirm which paths Harbor will publish from the overlay.",
-        },
-        {
-          tool: "harbor_publish_apply",
-          arguments: { sessionId: session.id },
-          reason: "Apply the reviewed draft into the repository once the user approves.",
-        },
-        {
-          tool: "harbor_list_approvals",
-          arguments: { sessionId: session.id, includeInactive: false },
-          reason: "Check whether a publish approval is already active for this session.",
-        },
+      primaryAction: suggestedCalls[0]!,
+      suggestedCalls,
+      checklist: [
+        "Review the exact diff one more time.",
+        "Confirm the publish surface matches intent.",
+        "Apply the publish and handle approval if Harbor gates it.",
       ],
       approvalFlow: buildApprovalFlow(),
     };
@@ -1058,11 +1232,20 @@ function buildSessionWorkflowGuide(
 
   return {
     scope: "session",
+    phase: "validate",
     summary: "This session has draft changes but no recorded Harbor test run yet.",
     recommendedNextStep:
       "Validate the draft with a Harbor test adapter, then preview and publish once the user is comfortable with the result.",
+    whyThisStep:
+      "The draft exists, but Harbor has not yet established whether it is safe to ship. Validation is the next decisive step.",
     currentState,
+    primaryAction: suggestedCalls[0]!,
     suggestedCalls,
+    checklist: [
+      "Inspect the current diff.",
+      "Choose a Harbor-managed test adapter.",
+      "Run validation before previewing or publishing the draft.",
+    ],
     approvalFlow: buildApprovalFlow(),
   };
 }
@@ -1076,6 +1259,128 @@ function buildApprovalFlow(): HarborWorkflowGuide["approvalFlow"] {
       "Retry the original Harbor tool after the grant is recorded.",
     ],
   };
+}
+
+function shouldHideTreeEntry(parentPath: string, entryPath: string): boolean {
+  if (isRepoNoisePath(parentPath)) {
+    return false;
+  }
+  return isRepoNoisePath(entryPath);
+}
+
+function isRepoNoisePath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/");
+  if (normalized === "." || normalized === "") {
+    return false;
+  }
+  const segments = normalized.split("/").filter(Boolean);
+  return segments.some((segment) => REPO_NOISE_SEGMENTS.has(segment));
+}
+
+function scoreRepoSearchPath(filePath: string, query: string, matchCount: number): number {
+  let score = matchCount * 10;
+  const normalized = filePath.replace(/\\/g, "/");
+  const lower = normalized.toLowerCase();
+  const queryLower = query.toLowerCase();
+  const base = path.posix.basename(normalized).toLowerCase();
+  const ext = path.posix.extname(normalized).toLowerCase();
+
+  if (!isRepoNoisePath(normalized)) {
+    score += 100;
+  }
+  if (lower.startsWith("packages/")) {
+    score += 40;
+  }
+  if (lower.includes("/src/")) {
+    score += 50;
+  }
+  if (base === queryLower || lower.endsWith(`/${queryLower}`)) {
+    score += 80;
+  }
+  if (lower.includes(queryLower)) {
+    score += 20;
+  }
+  if (base === "package.json" || base === "readme.md") {
+    score += 15;
+  }
+  if (SOURCE_FILE_EXTENSIONS.has(ext)) {
+    score += 15;
+  }
+  if (lower.endsWith(".log") || base === "pnpm-lock.yaml" || lower.includes("/dist/")) {
+    score -= 60;
+  }
+
+  return score;
+}
+
+function collectSuggestedSearchScopes(
+  files: RepoSearchResult["files"],
+  searchPath: string,
+): string[] {
+  if (searchPath !== ".") {
+    return [];
+  }
+
+  const scopes: string[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    const normalized = file.path.replace(/\\/g, "/");
+    const segments = normalized.split("/").filter(Boolean);
+    const scope = segments.length > 1 ? segments.slice(0, 2).join("/") : segments[0];
+    if (!scope || scope === "." || seen.has(scope)) {
+      continue;
+    }
+    seen.add(scope);
+    scopes.push(scope);
+    if (scopes.length >= 3) {
+      break;
+    }
+  }
+  return scopes;
+}
+
+function sliceFileContent(
+  filePath: string,
+  content: string,
+  startLine?: number,
+  maxLines?: number,
+): FileReadResult {
+  if (startLine !== undefined && startLine < 1) {
+    throw new ValidationError("startLine must be at least 1", { path: filePath, startLine });
+  }
+  if (maxLines !== undefined && maxLines < 1) {
+    throw new ValidationError("maxLines must be at least 1", { path: filePath, maxLines });
+  }
+
+  const lines = splitContentLines(content);
+  const totalLines = lines.length;
+  if (startLine !== undefined && totalLines > 0 && startLine > totalLines) {
+    throw new ValidationError("startLine exceeds file length", {
+      path: filePath,
+      startLine,
+      totalLines,
+    });
+  }
+  const safeStartLine = totalLines === 0 ? 0 : (startLine ?? 1);
+  const startIndex = safeStartLine === 0 ? 0 : safeStartLine - 1;
+  const endIndex = maxLines === undefined ? totalLines : Math.min(startIndex + maxLines, totalLines);
+  const slicedLines = lines.slice(startIndex, endIndex);
+  const endLine = slicedLines.length === 0 ? 0 : startIndex + slicedLines.length;
+
+  return {
+    path: filePath,
+    content: slicedLines.join(""),
+    startLine: safeStartLine,
+    endLine,
+    totalLines,
+    returnedLineCount: slicedLines.length,
+    truncated: endIndex < totalLines,
+    nextStartLine: endIndex < totalLines ? endIndex + 1 : undefined,
+  };
+}
+
+function splitContentLines(content: string): string[] {
+  return content.match(/[^\n]*\n|[^\n]+$/g) ?? [];
 }
 
 function sumDiffLines(

@@ -32,6 +32,8 @@ interface PublishPreviewLike {
 }
 
 interface SearchRepoLike {
+  query: string;
+  searchPath: string;
   matches: Array<{ path: string; lineNumber: number; line: string }>;
   scannedFiles: number;
   truncated: boolean;
@@ -42,6 +44,18 @@ interface SearchRepoLike {
     firstMatchLine: string;
   }>;
   suggestedPaths: string[];
+  recommendedScopes: string[];
+}
+
+interface FileReadLike {
+  path: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  returnedLineCount: number;
+  truncated: boolean;
+  nextStartLine?: number;
 }
 
 export interface HarborMcpServerOptions extends HarborAgentBridgeOptions {
@@ -64,7 +78,7 @@ export function createHarborMcpServer(options: HarborMcpServerOptions = {}): Mcp
   registerTool(server, "harbor_start_here", "Start here for the fastest Harbor entrypoint. Returns the next recommended workflow step for the current repo or session.", z.object({
     repoPath: z.string().optional(),
     sessionId: z.string().optional(),
-  }), (input) => bridge.getWorkflowGuide(input));
+  }), (input) => bridge.startHere(input));
 
   registerTool(server, "harbor_open_session", "Open an existing Harbor session or create one for a repository.", z.object({
     repoPath: z.string().optional(),
@@ -83,6 +97,8 @@ export function createHarborMcpServer(options: HarborMcpServerOptions = {}): Mcp
   registerTool(server, "harbor_read_file", "Read a repository file through Harbor's read-only repository capability.", z.object({
     sessionId: z.string(),
     path: z.string(),
+    startLine: z.number().int().positive().optional(),
+    maxLines: z.number().int().positive().optional(),
   }), (input) => bridge.readRepoFile(input));
 
   registerTool(server, "harbor_list_tree", "List a repository tree through Harbor's repo view.", z.object({
@@ -101,6 +117,8 @@ export function createHarborMcpServer(options: HarborMcpServerOptions = {}): Mcp
   registerTool(server, "harbor_read_draft", "Read draft-aware file contents from Harbor overlay state.", z.object({
     sessionId: z.string(),
     path: z.string(),
+    startLine: z.number().int().positive().optional(),
+    maxLines: z.number().int().positive().optional(),
   }), (input) => bridge.readDraftFile(input));
 
   registerTool(server, "harbor_write_draft", "Write file content into the Harbor draft overlay without publishing to the repository.", z.object({
@@ -297,16 +315,39 @@ function formatToolText(name: string, result: BridgeResult<unknown>): string {
         "Next: read a file with `harbor_read_file`, or search with `harbor_search_repo` if you know a symbol or string.",
       ].join("\n");
     }
-    if ((name === "harbor_read_file" || name === "harbor_read_draft") && hasContent(data)) {
-      return [
-        `${name === "harbor_read_draft" ? "Draft-aware" : "Repository"} file content:`,
-        clipBlock(data.content, 24),
-        "Next: if this is the file you want to change, write a draft and inspect it with `harbor_diff`.",
-      ].join("\n");
+    if ((name === "harbor_read_file" || name === "harbor_read_draft") && isFileReadLike(data)) {
+      const displayLimit = 40;
+      const visibleEndLine = data.returnedLineCount > 0
+        ? Math.min(data.startLine + displayLimit - 1, data.endLine)
+        : 0;
+      const lines = [
+        `${name === "harbor_read_draft" ? "Draft-aware" : "Repository"} file content: ${data.path}`,
+        data.returnedLineCount > 0
+          ? `Lines: ${data.startLine}-${data.endLine} of ${data.totalLines}${data.truncated ? ` (next starts at line ${data.nextStartLine})` : ""}`
+          : `Lines: empty file (${data.totalLines} total)`,
+        formatNumberedBlock(data.content, data.startLine, displayLimit),
+      ];
+      if (data.returnedLineCount > displayLimit) {
+        lines.push(`Display clipped to lines ${data.startLine}-${visibleEndLine}; request a smaller window for easier review.`);
+      }
+      if (data.truncated && data.nextStartLine) {
+        lines.push(`Next chunk: \`${
+          name === "harbor_read_draft" ? "harbor_read_draft" : "harbor_read_file"
+        } ${JSON.stringify({
+          sessionId: "<session-id>",
+          path: data.path,
+          startLine: data.nextStartLine,
+          maxLines: Math.max(data.returnedLineCount, 40),
+        })}\``);
+      } else {
+        lines.push("Next: if this is the file you want to change, write a draft and inspect it with `harbor_diff`.");
+      }
+      return lines.join("\n");
     }
     if (name === "harbor_search_repo" && isSearchRepoLike(data)) {
       const lines = [
         `Search matched ${data.matches.length} line${data.matches.length === 1 ? "" : "s"} across ${data.files.length} file${data.files.length === 1 ? "" : "s"}.`,
+        `Scope: ${data.searchPath}`,
         `Scanned files: ${data.scannedFiles}${data.truncated ? " (truncated)" : ""}`,
       ];
       if (data.files.length > 0) {
@@ -314,7 +355,16 @@ function formatToolText(name: string, result: BridgeResult<unknown>): string {
         for (const file of data.files.slice(0, 5)) {
           lines.push(`- ${file.path}: ${file.matchCount} match${file.matchCount === 1 ? "" : "es"}, first at line ${file.firstMatchLineNumber}`);
         }
-        lines.push(`Next: read ${data.suggestedPaths[0] ?? "<path>"} with \`harbor_read_file\`.`);
+        if (data.truncated && data.recommendedScopes.length > 0) {
+          lines.push(`Suggested narrower paths: ${data.recommendedScopes.join(", ")}`);
+          lines.push(`Next: retry with \`harbor_search_repo ${JSON.stringify({
+            sessionId: "<session-id>",
+            query: data.query,
+            path: data.recommendedScopes[0],
+          })}\`.`);
+        } else {
+          lines.push(`Next: read ${data.suggestedPaths[0] ?? "<path>"} with \`harbor_read_file\`.`);
+        }
       } else {
         lines.push("Next: broaden the query or search a narrower path.");
       }
@@ -369,13 +419,13 @@ function formatToolText(name: string, result: BridgeResult<unknown>): string {
         for (const file of data.files.slice(0, 5)) {
           lines.push(`- ${file.path}: +${file.addedLines} -${file.removedLines} across ${file.hunkCount} hunk${file.hunkCount === 1 ? "" : "s"}`);
           if (file.previewLines.length > 0) {
-            for (const previewLine of file.previewLines.slice(0, 2)) {
+            for (const previewLine of file.previewLines.slice(0, 4)) {
               lines.push(`  ${previewLine}`);
             }
           }
         }
       }
-      lines.push("Next: if this looks right, call `harbor_publish_apply` and handle approval if Harbor requests it.");
+      lines.push("Next: if you need the full patch, call `harbor_diff`; if this looks right, call `harbor_publish_apply` and handle approval if Harbor requests it.");
       return lines.join("\n");
     }
     if (name === "harbor_publish_apply" && isPublishLike(data)) {
@@ -429,8 +479,10 @@ function formatToolText(name: string, result: BridgeResult<unknown>): string {
 function formatWorkflowGuide(guide: HarborWorkflowGuide): string {
   const lines = [
     `Harbor guide scope: ${guide.scope}`,
+    `Phase: ${guide.phase}`,
     `Summary: ${guide.summary}`,
     `Next: ${guide.recommendedNextStep}`,
+    `Why now: ${guide.whyThisStep}`,
   ];
 
   if (guide.currentState.sessionId) {
@@ -452,6 +504,16 @@ function formatWorkflowGuide(guide: HarborWorkflowGuide): string {
     lines.push(`Available adapters: ${guide.currentState.availableAdapters.join(", ")}`);
   }
 
+  lines.push(`Do this now: ${guide.primaryAction.tool} ${JSON.stringify(guide.primaryAction.arguments)}`);
+  lines.push(`Primary reason: ${guide.primaryAction.reason}`);
+
+  if (guide.checklist.length > 0) {
+    lines.push("Checklist:");
+    for (const item of guide.checklist) {
+      lines.push(`- ${item}`);
+    }
+  }
+
   lines.push("Suggested Harbor calls:");
   for (const call of guide.suggestedCalls) {
     lines.push(`- ${call.tool} ${JSON.stringify(call.arguments)}: ${call.reason}`);
@@ -468,9 +530,13 @@ function formatWorkflowGuide(guide: HarborWorkflowGuide): string {
 function isWorkflowGuide(value: unknown): value is HarborWorkflowGuide {
   return isRecord(value)
     && typeof value.scope === "string"
+    && typeof value.phase === "string"
     && typeof value.summary === "string"
     && typeof value.recommendedNextStep === "string"
-    && Array.isArray(value.suggestedCalls);
+    && typeof value.whyThisStep === "string"
+    && isRecord(value.primaryAction)
+    && Array.isArray(value.suggestedCalls)
+    && Array.isArray(value.checklist);
 }
 
 function isOpenSessionSummary(value: unknown): value is OpenSessionSummaryLike {
@@ -505,17 +571,27 @@ function isTreeLike(value: unknown): value is { rootPath: string; tree: string }
     && typeof value.tree === "string";
 }
 
-function hasContent(value: unknown): value is { content: string } {
-  return isRecord(value) && typeof value.content === "string";
+function isFileReadLike(value: unknown): value is FileReadLike {
+  return isRecord(value)
+    && typeof value.path === "string"
+    && typeof value.content === "string"
+    && typeof value.startLine === "number"
+    && typeof value.endLine === "number"
+    && typeof value.totalLines === "number"
+    && typeof value.returnedLineCount === "number"
+    && typeof value.truncated === "boolean";
 }
 
 function isSearchRepoLike(value: unknown): value is SearchRepoLike {
   return isRecord(value)
+    && typeof value.query === "string"
+    && typeof value.searchPath === "string"
     && Array.isArray(value.matches)
     && typeof value.scannedFiles === "number"
     && typeof value.truncated === "boolean"
     && Array.isArray(value.files)
-    && Array.isArray(value.suggestedPaths);
+    && Array.isArray(value.suggestedPaths)
+    && Array.isArray(value.recommendedScopes);
 }
 
 function isWriteDraftResult(value: unknown): value is { ok: true } {
@@ -579,10 +655,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function clipBlock(content: string, maxLines: number): string {
-  const lines = content.split(/\r?\n/);
-  if (lines.length <= maxLines) {
-    return lines.join("\n");
+function formatNumberedBlock(content: string, startLine: number, maxLines: number): string {
+  const rawLines = splitContentLines(content);
+  if (rawLines.length === 0) {
+    return "(empty)";
   }
-  return `${lines.slice(0, maxLines).join("\n")}\n...`;
+
+  const numbered = rawLines.slice(0, maxLines).map((line, index) => {
+    const lineNumber = startLine + index;
+    const text = line.endsWith("\n") ? line.slice(0, -1) : line;
+    return `${String(lineNumber).padStart(5, " ")} | ${text}`;
+  });
+
+  if (rawLines.length > maxLines) {
+    numbered.push("...");
+  }
+
+  return numbered.join("\n");
+}
+
+function splitContentLines(content: string): string[] {
+  return content.match(/[^\n]*\n|[^\n]+$/g) ?? [];
 }

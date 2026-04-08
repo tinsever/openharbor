@@ -69,6 +69,7 @@ If your client spawns MCP servers for you, use the JSON snippet from `harbor mcp
 
 Harbor exposes task-oriented tools rather than a generic capability shell:
 
+- `harbor_get_guide`
 - `harbor_open_session`
 - `harbor_list_sessions`
 - `harbor_get_overview`
@@ -79,6 +80,7 @@ Harbor exposes task-oriented tools rather than a generic capability shell:
 - `harbor_write_draft`
 - `harbor_delete_draft`
 - `harbor_diff`
+- `harbor_list_test_adapters`
 - `harbor_run_tests`
 - `harbor_list_test_runs`
 - `harbor_get_artifact`
@@ -97,6 +99,10 @@ Approval flow is always two-step:
 2. The client asks the user.
 3. The client calls `harbor_grant_approval`.
 4. The client retries the original tool.
+
+For the best MCP experience, start with `harbor_start_here` or `harbor_get_guide` when a client is unsure which Harbor tool to call next. The guide response includes a workflow phase, a single `primaryAction`, a short checklist, and follow-up calls so the client can execute the next Harbor step directly instead of reconstructing the flow from scratch.
+
+For large files, `harbor_read_file` and `harbor_read_draft` also accept `startLine` and `maxLines` so a client can read explicit windows instead of relying on clipped display text. For broad repo searches, prefer passing `path` to `harbor_search_repo`; Harbor will now suggest narrower paths when a root search truncates.
 
 ## CLI workflow
 

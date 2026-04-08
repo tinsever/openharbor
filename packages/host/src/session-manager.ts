@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type {
@@ -29,7 +30,7 @@ export class SessionManager {
   async createSession(repoPath: string, name?: string): Promise<SessionRecord> {
     const id = randomUUID();
     const now = new Date().toISOString();
-    const resolved = path.resolve(repoPath);
+    const resolved = await resolveSessionRepoPath(repoPath);
     const session: SessionRecord = {
       id,
       repoPath: resolved,
@@ -220,7 +221,17 @@ export class SessionManager {
   }
 
   async listSessions(): Promise<SessionRecord[]> {
-    return this.store.listSessions();
+    const stored = await this.store.listSessions();
+    const merged = new Map<string, SessionRecord>();
+
+    for (const session of stored) {
+      merged.set(session.id, session);
+    }
+    for (const bundle of this.cache.values()) {
+      merged.set(bundle.session.id, bundle.session);
+    }
+
+    return [...merged.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async getSessionRecord(sessionId: string): Promise<SessionRecord | null> {
@@ -265,6 +276,15 @@ export class SessionManager {
       sessionId,
       grants.map((grant) => ({ ...grant, status: normalizeGrantStatus(grant.status) })),
     );
+  }
+}
+
+async function resolveSessionRepoPath(repoPath: string): Promise<string> {
+  const resolved = path.resolve(repoPath);
+  try {
+    return await fs.realpath(resolved);
+  } catch {
+    return resolved;
   }
 }
 

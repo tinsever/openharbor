@@ -1,4 +1,4 @@
-import { access, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -150,8 +150,10 @@ describe("Harbor integration", () => {
   it("lists directories, stats paths, and searches repo text", async () => {
     await withTempRepo(async ({ repo, dataDir }) => {
       await mkdir(path.join(repo, "src"), { recursive: true });
+      await mkdir(path.join(repo, "node_modules", "pkg"), { recursive: true });
       await writeFile(path.join(repo, "src", "app.ts"), "const value = 42;\n", "utf8");
       await writeFile(path.join(repo, "notes.md"), "Harbor search target\n", "utf8");
+      await writeFile(path.join(repo, "node_modules", "pkg", "index.js"), "const harbor = 'noise';\n", "utf8");
 
       const env = createHarborEnvironment(dataDir);
       const session = await env.sessions.createSession(repo);
@@ -165,7 +167,6 @@ describe("Harbor integration", () => {
           expect.objectContaining({ path: "src", type: "dir" }),
         ]),
       );
-
       const statFound = (await env.invoke(session.id, "repo.stat", {
         path: "src/app.ts",
       })) as {
@@ -192,6 +193,42 @@ describe("Harbor integration", () => {
         lineNumber: 1,
         line: "Harbor search target",
       });
+      expect(search.matches.some((match) => match.path.includes("node_modules"))).toBe(false);
+
+      const fileSearch = (await env.invoke(session.id, "repo.search", {
+        query: "value",
+        path: "src/app.ts",
+      })) as {
+        matches: Array<{ path: string; lineNumber: number; line: string }>;
+        scannedFiles: number;
+        truncated: boolean;
+      };
+      expect(fileSearch.truncated).toBe(false);
+      expect(fileSearch.scannedFiles).toBe(1);
+      expect(fileSearch.matches).toEqual([
+        {
+          path: "src/app.ts",
+          lineNumber: 1,
+          line: "const value = 42;",
+        },
+      ]);
+    });
+  });
+
+  it("lists sessions for equivalent repo paths", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const root = path.dirname(repo);
+      const repoAlias = path.join(root, "repo-link");
+      await symlink(repo, repoAlias);
+
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repoAlias);
+
+      const allSessions = await env.listSessions();
+      expect(allSessions.map((item) => item.id)).toContain(session.id);
+
+      const repoSessions = await env.listSessions(repo);
+      expect(repoSessions.map((item) => item.id)).toContain(session.id);
     });
   });
 
