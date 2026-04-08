@@ -132,10 +132,7 @@ export class CapabilityHost {
 
     await this.appendAudit(ctx.session.id, {
       type: "capability.result",
-      payload: {
-        capabilityName: name,
-        ok: true,
-      },
+      payload: buildCapabilityResultAuditPayload(name, output),
     });
 
     return output as TOut;
@@ -217,4 +214,81 @@ function truncateForAudit(s: string, max = 2_000): string {
     return s;
   }
   return `${s.slice(0, max)}…`;
+}
+
+function buildCapabilityResultAuditPayload(
+  capabilityName: string,
+  output: unknown,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    capabilityName,
+    ok: true,
+  };
+  if (!isRecord(output)) {
+    return payload;
+  }
+
+  const artifactRefs = collectArtifactRefs(output);
+  if (artifactRefs.length > 0) {
+    payload.artifactRefs = artifactRefs;
+  }
+  if (typeof output.runId === "string") {
+    payload.runId = output.runId;
+  }
+
+  const outputSummary: Record<string, unknown> = {};
+  if (typeof output.found === "boolean") {
+    outputSummary.found = output.found;
+  }
+  if (typeof output.changeCount === "number") {
+    outputSummary.changeCount = output.changeCount;
+  }
+  if (typeof output.published === "boolean") {
+    outputSummary.published = output.published;
+  }
+  if (typeof output.ok === "boolean") {
+    outputSummary.ok = output.ok;
+  }
+  if (typeof output.exitCode === "number") {
+    outputSummary.exitCode = output.exitCode;
+  }
+  if (typeof output.timedOut === "boolean") {
+    outputSummary.timedOut = output.timedOut;
+  }
+  if (Object.keys(outputSummary).length > 0) {
+    payload.outputSummary = outputSummary;
+  }
+
+  return payload;
+}
+
+function collectArtifactRefs(output: Record<string, unknown>): string[] {
+  const refs = new Set<string>();
+
+  if (typeof output.artifactId === "string") {
+    refs.add(output.artifactId);
+  }
+  if (typeof output.stdoutArtifactId === "string") {
+    refs.add(output.stdoutArtifactId);
+  }
+  if (typeof output.stderrArtifactId === "string") {
+    refs.add(output.stderrArtifactId);
+  }
+  if (Array.isArray(output.artifacts)) {
+    for (const artifact of output.artifacts) {
+      if (!artifact || typeof artifact !== "object") {
+        continue;
+      }
+      const candidate = (artifact as Record<string, unknown>).artifactId;
+      if (typeof candidate === "string") {
+        refs.add(candidate);
+      }
+    }
+  }
+
+  return [...refs];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
