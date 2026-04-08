@@ -39,25 +39,65 @@ async function seedAdversarialFixture(repo: string): Promise<void> {
 async function runHarborCli(
   args: string[],
   cwd: string,
-): Promise<{ stdout: string; stderr: string }> {
+  opts?: {
+    expectFailure?: boolean;
+  },
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const cliPath = path.resolve(__dirname, "../../../apps/harbor-cli/dist/cli.js");
-  const out = await runExecFile("node", [cliPath, ...args], {
-    cwd,
-    env: process.env,
-  });
+  let out: Awaited<ReturnType<typeof runExecFile>>;
+  try {
+    out = await runExecFile("node", [cliPath, ...args], {
+      cwd,
+      env: process.env,
+    });
+  } catch (error) {
+    if (!opts?.expectFailure) {
+      throw error;
+    }
+    const err = error as {
+      stdout?: string;
+      stderr?: string;
+      code?: number;
+      signal?: string;
+      message: string;
+    };
+    return {
+      stdout: err.stdout ?? "",
+      stderr: err.stderr ?? err.message,
+      exitCode: typeof err.code === "number" ? err.code : 1,
+    };
+  }
   return {
     stdout: out.stdout,
     stderr: out.stderr,
+    exitCode: 0,
   };
 }
 
 function parseLastJsonObject(stdout: string): Record<string, unknown> {
-  const marker = stdout.indexOf("{");
-  if (marker < 0) {
-    throw new Error(`No JSON object found in stdout: ${stdout}`);
+  const candidates: number[] = [];
+  for (let i = 0; i < stdout.length; i += 1) {
+    if (stdout[i] === "{") {
+      candidates.push(i);
+    }
   }
-  const jsonText = stdout.slice(marker);
-  return JSON.parse(jsonText) as Record<string, unknown>;
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
+    const marker = candidates[i]!;
+    const jsonText = stdout.slice(marker);
+    try {
+      return JSON.parse(jsonText) as Record<string, unknown>;
+    } catch {
+      // keep scanning for a valid trailing JSON object
+    }
+  }
+  throw new Error(`No JSON object found in stdout: ${stdout}`);
+}
+
+function normalizeDynamic(text: string): string {
+  return text
+    .replace(/[0-9a-f]{8}-[0-9a-f-]{27}/gi, "<id>")
+    .replace(/run-[a-z0-9-]+/gi, "<run-id>")
+    .replace(/\b[0-9a-f]{8}\b/gi, "<short-id>");
 }
 
 function hashLegacyAuditRecord(input: {
@@ -970,6 +1010,236 @@ describe("Harbor integration", () => {
       expect(
         replayJson.timeline.capabilityCalls.some((entry) => entry.capabilityName === "tests.run"),
       ).toBe(true);
+    });
+  });
+
+  it("supports inspect -> draft -> test -> review -> publish CLI flow with review JSON mode", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const initOut = await runHarborCli(["init", repo, "--data-dir", dataDir], repo);
+      const initJson = JSON.parse(initOut.stdout) as { session: { id: string } };
+      const sessionId = initJson.session.id;
+
+      const readOut = await runHarborCli(["read", sessionId, "hello.txt", "--repo", "--data-dir", dataDir], repo);
+      expect(readOut.stdout).toContain("Next:");
+      const readJson = parseLastJsonObject(readOut.stdout) as { status: string; value: { content: string } };
+      expect(readJson.status).toBe("ok");
+      expect(readJson.value.content).toBe("base\n");
+
+      const writeOut = await runHarborCli(
+        ["write", sessionId, "hello.txt", "--content", "changed\n", "--data-dir", dataDir],
+        repo,
+      );
+      expect(writeOut.stdout).toContain("Next:");
+      expect((parseLastJsonObject(writeOut.stdout) as { status: string }).status).toBe("ok");
+
+      const diffOut = await runHarborCli(["diff", sessionId, "--data-dir", dataDir], repo);
+      expect(diffOut.stdout).toContain("Next:");
+      expect((parseLastJsonObject(diffOut.stdout) as { status: string }).status).toBe("ok");
+
+      await runHarborCli(["test", sessionId, "pnpm-test", "--approve", "--data-dir", dataDir], repo);
+
+      const reviewOut = await runHarborCli(["review", sessionId, "--data-dir", dataDir], repo);
+      const normalized = normalizeDynamic(reviewOut.stdout);
+      expect(normalized).toContain("Task Summary:");
+      expect(normalized).toContain("Changed Files:");
+      expect(normalized).toContain("Diff Summary:");
+      expect(normalized).toContain("Test Outcome:");
+      expect(normalized).toContain("Publish Intent:");
+      expect(normalized).toContain("Next:");
+
+      const reviewJsonOut = await runHarborCli(["review", sessionId, "--json", "--data-dir", dataDir], repo);
+      const reviewJson = JSON.parse(reviewJsonOut.stdout) as {
+        status: string;
+        taskSummary: { changeCount: number };
+        diffSummary: { fileCount: number };
+      };
+      expect(reviewJson.status).toBe("ok");
+      expect(reviewJson.taskSummary.changeCount).toBeGreaterThan(0);
+      expect(reviewJson.diffSummary.fileCount).toBeGreaterThan(0);
+
+      const publishOut = await runHarborCli(
+        ["publish", sessionId, "--approve", "--yes", "--data-dir", dataDir],
+        repo,
+      );
+      const publishJson = parseLastJsonObject(publishOut.stdout) as { status: string };
+      expect(publishJson.status).toBe("ok");
+      expect(await readFile(path.join(repo, "hello.txt"), "utf8")).toBe("changed\n");
+    });
+  });
+
+  it("supports run --file flow and verbose review details", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+      const taskPath = path.join(repo, "task.js");
+      await writeFile(
+        taskPath,
+        [
+          'const file = await harbor.invoke("repo.readFile", { path: "hello.txt" });',
+          'await harbor.invoke("workspace.writeFile", { path: "hello.txt", content: file.content.toUpperCase() });',
+          'return await harbor.invoke("publish.preview", {});',
+        ].join("\n"),
+        "utf8",
+      );
+
+      const runOut = await runHarborCli(
+        ["run", session.id, "--file", taskPath, "--data-dir", dataDir],
+        repo,
+      );
+      expect(runOut.stdout).toContain("Next:");
+      expect((parseLastJsonObject(runOut.stdout) as { status: string }).status).toBe("ok");
+
+      const reviewOut = await runHarborCli(
+        ["review", session.id, "--verbose", "--data-dir", dataDir],
+        repo,
+      );
+      expect(reviewOut.stdout).toContain("Diff Details:");
+    });
+  });
+
+  it("emits validation taxonomy for task scope without task-id", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+      const out = await runHarborCli(
+        ["test", session.id, "pnpm-test", "--approve-scope", "task", "--data-dir", dataDir],
+        repo,
+        { expectFailure: true },
+      );
+      expect(out.exitCode).toBe(1);
+      expect(out.stderr).toContain("[validation_error]");
+      const json = parseLastJsonObject(out.stdout) as { category: string; errorCode: string };
+      expect(json.category).toBe("validation_error");
+      expect(json.errorCode).toBe("approval.scope.task_id_required");
+    });
+  });
+
+  it("emits approval-required taxonomy and remediation hints for publish without grant", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+      await env.invoke(session.id, "workspace.writeFile", { path: "hello.txt", content: "pending\n" });
+
+      const out = await runHarborCli(
+        ["publish", session.id, "--yes", "--data-dir", dataDir],
+        repo,
+      );
+      const json = parseLastJsonObject(out.stdout) as {
+        status: string;
+        category?: string;
+        errorCode?: string;
+        nextAction?: string;
+      };
+      expect(json.status).toBe("approval_required");
+      expect(json.category).toBe("approval_required");
+      expect(json.errorCode).toBe("approval.required");
+      expect((json.nextAction ?? "").toLowerCase()).toContain("review");
+    });
+  });
+
+  it("supports discard + reject + revise + approvals revoke flow", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const env = createHarborEnvironment(dataDir);
+      const session = await env.sessions.createSession(repo);
+      await runHarborCli(
+        ["write", session.id, "hello.txt", "--content", "draft-1\n", "--data-dir", dataDir],
+        repo,
+      );
+
+      const rejectOut = await runHarborCli(
+        ["reject", session.id, "--reason", "not ready", "--data-dir", dataDir],
+        repo,
+      );
+      expect((parseLastJsonObject(rejectOut.stdout) as { status: string }).status).toBe("ok");
+
+      const reviseOut = await runHarborCli(
+        ["revise", session.id, "--note", "try smaller diff", "--data-dir", dataDir],
+        repo,
+      );
+      expect((parseLastJsonObject(reviseOut.stdout) as { status: string }).status).toBe("ok");
+
+      const discardOut = await runHarborCli(["discard", session.id, "hello.txt", "--data-dir", dataDir], repo);
+      expect((parseLastJsonObject(discardOut.stdout) as { status: string }).status).toBe("ok");
+
+      await runHarborCli(
+        ["write", session.id, "hello.txt", "--content", "publishable\n", "--data-dir", dataDir],
+        repo,
+      );
+      await runHarborCli(
+        ["publish", session.id, "--approve", "--approve-scope", "session", "--yes", "--data-dir", dataDir],
+        repo,
+      );
+      const revokeOut = await runHarborCli(
+        ["approvals", "revoke", session.id, "--all", "--reason", "cleanup", "--data-dir", dataDir],
+        repo,
+      );
+      const revokeJson = parseLastJsonObject(revokeOut.stdout) as { status: string; value: { revokedCount: number } };
+      expect(revokeJson.status).toBe("ok");
+      expect(revokeJson.value.revokedCount).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it("shows policy preset impact in strict mode and keeps help text coherent", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const initOut = await runHarborCli(
+        ["init", repo, "--data-dir", dataDir, "--policy-preset", "strict"],
+        repo,
+      );
+      const sessionId = (JSON.parse(initOut.stdout) as { session: { id: string } }).session.id;
+
+      const strictTest = await runHarborCli(
+        ["test", sessionId, "pnpm-test", "--data-dir", dataDir, "--policy-preset", "strict"],
+        repo,
+      );
+      const strictJson = parseLastJsonObject(strictTest.stdout) as {
+        status: string;
+        category?: string;
+        errorCode?: string;
+      };
+      expect(strictJson.status).toBe("approval_required");
+      expect(strictJson.category).toBe("approval_required");
+      expect(strictJson.errorCode).toBe("approval.required");
+
+      const helpOut = await runHarborCli(["help"], repo);
+      expect(helpOut.stdout).toContain("harbor review <session-id> [--json] [--verbose]");
+      expect(helpOut.stdout).toContain("Core Flow (inspect -> draft -> test -> review -> publish)");
+    });
+  });
+
+  it("returns bridge taxonomy metadata for approval and capability errors via CLI paths", async () => {
+    await withTempRepo(async ({ repo, dataDir }) => {
+      const initOut = await runHarborCli(["init", repo, "--data-dir", dataDir], repo);
+      const sessionId = (JSON.parse(initOut.stdout) as { session: { id: string } }).session.id;
+      await runHarborCli(
+        ["write", sessionId, "hello.txt", "--content", "from-bridge\n", "--data-dir", dataDir],
+        repo,
+      );
+
+      const approvalOut = await runHarborCli(
+        ["publish", sessionId, "--yes", "--data-dir", dataDir],
+        repo,
+      );
+      const approval = parseLastJsonObject(approvalOut.stdout) as {
+        status: string;
+        category?: string;
+        errorCode?: string;
+      };
+      expect(approval.status).toBe("approval_required");
+      expect(approval.category).toBe("approval_required");
+      expect(approval.errorCode).toBe("approval.required");
+
+      const capabilityOut = await runHarborCli(
+        ["call", sessionId, "missing.capability", "--data-dir", dataDir],
+        repo,
+      );
+      const capability = parseLastJsonObject(capabilityOut.stdout) as {
+        status: string;
+        category?: string;
+        errorCode?: string;
+      };
+      expect(capability.status).toBe("validation_error");
+      expect(capability.category).toBe("capability_error");
+      expect(capability.errorCode).toBe("capability.not_found");
     });
   });
 
