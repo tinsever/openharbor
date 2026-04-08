@@ -3,7 +3,12 @@ import {
   type ApprovalGrant,
   type PolicyPresetName,
 } from "@openharbor/policy";
-import { ApprovalRequiredError, PolicyDeniedError, ValidationError } from "@openharbor/core";
+import {
+  ApprovalRequiredError,
+  CapabilityNotFoundError,
+  PolicyDeniedError,
+  ValidationError,
+} from "@openharbor/core";
 import {
   createHarborEnvironment,
   type HarborEnvironment,
@@ -34,7 +39,7 @@ export type PiInvokeResult =
       status: "ok";
       value: unknown;
     }
-  | {
+    | {
       status: "approval_required";
       message: string;
       intent?: string;
@@ -42,6 +47,8 @@ export type PiInvokeResult =
       nextAction?: string;
       grantScopeHint?: ApprovalGrant["scope"];
       targetLabel?: string;
+      category?: string;
+      errorCode?: string;
     }
   | {
       status: "denied";
@@ -49,11 +56,16 @@ export type PiInvokeResult =
       reason?: string;
       nextAction?: string;
       targetLabel?: string;
+      category?: string;
+      errorCode?: string;
     }
   | {
       status: "validation_error";
       message: string;
       issues: unknown;
+      nextAction?: string;
+      category?: string;
+      errorCode?: string;
     };
 
 export type PiRunModelTaskResult =
@@ -61,7 +73,7 @@ export type PiRunModelTaskResult =
       status: "ok";
       value: RunModelTaskResult;
     }
-  | {
+    | {
       status: "approval_required";
       message: string;
       intent?: string;
@@ -69,6 +81,8 @@ export type PiRunModelTaskResult =
       nextAction?: string;
       grantScopeHint?: ApprovalGrant["scope"];
       targetLabel?: string;
+      category?: string;
+      errorCode?: string;
     }
   | {
       status: "denied";
@@ -76,11 +90,16 @@ export type PiRunModelTaskResult =
       reason?: string;
       nextAction?: string;
       targetLabel?: string;
+      category?: string;
+      errorCode?: string;
     }
   | {
       status: "validation_error";
       message: string;
       issues: unknown;
+      nextAction?: string;
+      category?: string;
+      errorCode?: string;
     };
 
 export interface HarborSessionSummary {
@@ -142,6 +161,8 @@ export class PiHarborBridge {
           nextAction: error.record.nextAction,
           grantScopeHint: error.record.grantScopeHint,
           targetLabel: error.record.targetLabel,
+          category: "approval_required",
+          errorCode: "approval.required",
         };
       }
       if (error instanceof PolicyDeniedError) {
@@ -151,6 +172,18 @@ export class PiHarborBridge {
           reason: error.record.reason,
           nextAction: error.record.nextAction,
           targetLabel: error.record.targetLabel,
+          category: "policy_denied",
+          errorCode: "policy.denied",
+        };
+      }
+      if (error instanceof CapabilityNotFoundError) {
+        return {
+          status: "validation_error",
+          message: error.message,
+          issues: { capabilityName: error.capabilityName },
+          nextAction: "Choose a capability from `harbor caps` and retry.",
+          category: "capability_error",
+          errorCode: "capability.not_found",
         };
       }
       if (error instanceof ValidationError) {
@@ -158,6 +191,9 @@ export class PiHarborBridge {
           status: "validation_error",
           message: error.message,
           issues: error.issues,
+          nextAction: "Fix invalid input and retry this capability call.",
+          category: "validation_error",
+          errorCode: "validation.failed",
         };
       }
       throw error;
@@ -195,6 +231,8 @@ export class PiHarborBridge {
           nextAction: error.record.nextAction,
           grantScopeHint: error.record.grantScopeHint,
           targetLabel: error.record.targetLabel,
+          category: "approval_required",
+          errorCode: "approval.required",
         };
       }
       if (error instanceof PolicyDeniedError) {
@@ -204,6 +242,8 @@ export class PiHarborBridge {
           reason: error.record.reason,
           nextAction: error.record.nextAction,
           targetLabel: error.record.targetLabel,
+          category: "policy_denied",
+          errorCode: "policy.denied",
         };
       }
       if (error instanceof ValidationError) {
@@ -211,6 +251,9 @@ export class PiHarborBridge {
           status: "validation_error",
           message: error.message,
           issues: error.issues,
+          nextAction: "Fix invalid model task inputs and retry.",
+          category: "validation_error",
+          errorCode: "validation.failed",
         };
       }
       throw error;
