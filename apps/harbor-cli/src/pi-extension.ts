@@ -11,6 +11,7 @@ interface HarborRuntimeState {
 
 const TOOL_NAMES = [
   "harbor_repo_read_file",
+  "harbor_repo_tree",
   "harbor_repo_search",
   "harbor_workspace_read_file",
   "harbor_workspace_write_file",
@@ -96,6 +97,12 @@ function resultToText(result: PiInvokeResult): string {
       : result.message;
     return `${header}\n${JSON.stringify(result.issues, null, 2)}`;
   }
+  if (result.status === "not_found") {
+    const header = result.category || result.errorCode
+      ? `${result.message}\nCategory: ${result.category ?? "not_found"}${result.errorCode ? ` (${result.errorCode})` : ""}`
+      : result.message;
+    return `${header}\nEntity: ${result.entity}`;
+  }
   const _exhaustive: never = result;
   return JSON.stringify(_exhaustive);
 }
@@ -108,6 +115,94 @@ function toolResponse(
     content: [{ type: "text", text }],
     details: { result: result ?? null },
   };
+}
+
+async function buildRepoTreeText(
+  state: HarborRuntimeState,
+  targetPath: string,
+  maxDepth?: number,
+): Promise<{ ok: true; text: string } | { ok: false; result: PiInvokeResult }> {
+  const stat = await state.bridge.invoke({
+    sessionId: state.sessionId,
+    capability: "repo.stat",
+    input: { path: targetPath },
+  });
+  if (stat.status !== "ok") {
+    return { ok: false, result: stat };
+  }
+
+  const statValue = stat.value as { exists?: boolean; type?: string };
+  if (statValue.exists !== true) {
+    return {
+      ok: false,
+      result: {
+        status: "validation_error",
+        message: `Path not found: ${targetPath}`,
+        issues: { path: targetPath },
+        nextAction: "Choose an existing repository-relative path and retry.",
+        category: "validation_error",
+        errorCode: "validation.failed",
+      },
+    };
+  }
+
+  const lines = [targetPath === "." ? "." : targetPath];
+  if (statValue.type === "dir" && maxDepth !== 0) {
+    const traversed = await appendRepoTreeLines(state, targetPath, lines, "", 0, maxDepth);
+    if (!traversed.ok) {
+      return traversed;
+    }
+  }
+
+  return { ok: true, text: lines.join("\n") };
+}
+
+async function appendRepoTreeLines(
+  state: HarborRuntimeState,
+  targetPath: string,
+  lines: string[],
+  prefix: string,
+  depth: number,
+  maxDepth?: number,
+): Promise<{ ok: true } | { ok: false; result: PiInvokeResult }> {
+  const listed = await state.bridge.invoke({
+    sessionId: state.sessionId,
+    capability: "repo.listDir",
+    input: { path: targetPath },
+  });
+  if (listed.status !== "ok") {
+    return { ok: false, result: listed };
+  }
+
+  const value = listed.value as {
+    entries?: Array<{ name?: string; path?: string; type?: string }>;
+  };
+  const entries = Array.isArray(value.entries) ? value.entries : [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index] ?? {};
+    const name = typeof entry.name === "string" ? entry.name : "<unknown>";
+    const entryPath = typeof entry.path === "string" ? entry.path : name;
+    const type = typeof entry.type === "string" ? entry.type : "other";
+    const isLast = index === entries.length - 1;
+    lines.push(`${prefix}${isLast ? "\\-" : "|-"} ${name}`);
+
+    if (type === "dir" && (maxDepth === undefined || depth + 1 < maxDepth)) {
+      const nested = await appendRepoTreeLines(
+        state,
+        entryPath,
+        lines,
+        `${prefix}${isLast ? "   " : "|  "}`,
+        depth + 1,
+        maxDepth,
+      );
+      if (!nested.ok) {
+        return nested;
+      }
+    }
+  }
+
+  return { ok: true };
 }
 
 async function invokeWithApproval(
@@ -219,6 +314,35 @@ export default function harborPiExtension(pi: ExtensionAPI): void {
           input: { path: params.path },
         });
         return toolResponse(resultToText(result), result);
+      },
+    }),
+  );
+
+  pi.registerTool(
+    defineTool({
+      name: "harbor_repo_tree",
+      label: "Harbor Repo Tree",
+      description: "Show an ASCII tree for a repository path through Harbor capability policy.",
+      promptSnippet: "Inspect repository structure through Harbor using a tree view.",
+      parameters: Type.Object({
+        path: Type.Optional(Type.String({ description: "Repository-relative path", default: "." })),
+        depth: Type.Optional(
+          Type.Number({
+            description: "Maximum directory depth to expand; omit for full recursion",
+            minimum: 0,
+          }),
+        ),
+      }),
+      async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+        const state = runtime.state;
+        if (!state) {
+          return toolResponse("Harbor session not initialized");
+        }
+        const tree = await buildRepoTreeText(state, params.path ?? ".", params.depth);
+        if (!tree.ok) {
+          return toolResponse(resultToText(tree.result), tree.result);
+        }
+        return toolResponse(tree.text);
       },
     }),
   );

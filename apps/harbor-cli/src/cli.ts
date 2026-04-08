@@ -10,6 +10,7 @@ import {
   resolvePolicyPreset,
   type ApprovalGrant,
 } from "@openharbor/pi-integration";
+import { createHarborAgentBridge, type HarborAgentBridge } from "@openharbor/agent-bridge";
 
 interface ParsedArgs {
   _: string[];
@@ -42,6 +43,7 @@ const COMMAND_USAGE = {
   caps: "harbor caps [--data-dir <dir>] [--policy-preset <name>]",
   call: "harbor call <session-id> <capability> [--input '<json>'] [--grant <effectClass[:targetId]>] [--approve-scope <once|task|session>] [--task-id <id>] [--policy-preset <name>]",
   read: "harbor read <session-id> <path> [--repo] [--policy-preset <name>]",
+  tree: "harbor tree <session-id> [path] [--depth <n>] [--policy-preset <name>]",
   write: "harbor write <session-id> <path> --content '<text>' [--policy-preset <name>]",
   delete: "harbor delete <session-id> <path> [--file] [--policy-preset <name>]",
   changes: "harbor changes <session-id> [--policy-preset <name>]",
@@ -56,6 +58,9 @@ const COMMAND_USAGE = {
   approvals: "harbor approvals <list|revoke> <session-id> [flags]",
   audit: "harbor audit <inspect|search|replay> <session-id> [flags]",
   auditSearch: "harbor audit search <session-id> --query <text> [--limit N] [--type <eventType>]",
+  sessions: "harbor sessions <list|inspect> [session-id] [--repo <path>] [--data-dir <dir>] [--policy-preset <name>]",
+  artifact: "harbor artifact get <session-id> <artifact-id> [--text] [--data-dir <dir>] [--policy-preset <name>]",
+  mcp: "harbor mcp <serve|config> [client] [--data-dir <dir>] [--policy-preset <name>]",
   pi: "harbor pi [repo-path] [--repo <path>] [--data-dir <dir>] [--approved-adapters <csv>] [--policy-preset <name>] [--keep-default-tools] [-- <pi args>]",
 } as const;
 
@@ -71,6 +76,7 @@ async function main(): Promise<void> {
   const dataDir = getStringOption(parsed.options, "data-dir");
   const policyPreset = getPolicyPresetOption(parsed.options);
   const bridge = new PiHarborBridge({ dataDir, policyPreset });
+  const agentBridge = createHarborAgentBridge({ dataDir, policyPreset });
 
   switch (command) {
     case "init":
@@ -84,6 +90,9 @@ async function main(): Promise<void> {
       return;
     case "read":
       await cmdRead(bridge, rest, parsed.options);
+      return;
+    case "tree":
+      await cmdTree(bridge, rest, parsed.options);
       return;
     case "write":
       await cmdWrite(bridge, rest, parsed.options);
@@ -123,6 +132,15 @@ async function main(): Promise<void> {
       return;
     case "audit":
       await cmdAudit(bridge, rest, parsed.options);
+      return;
+    case "sessions":
+      await cmdSessions(agentBridge, rest, parsed.options);
+      return;
+    case "artifact":
+      await cmdArtifact(agentBridge, rest);
+      return;
+    case "mcp":
+      await cmdMcp(rest, parsed.options);
       return;
     case "pi":
       await cmdPi(rest, parsed.options);
@@ -205,6 +223,55 @@ async function cmdRead(
     input: { path: filePath },
   });
   printResult(result, "read");
+}
+
+async function cmdTree(
+  bridge: PiHarborBridge,
+  args: string[],
+  options: Record<string, string | boolean | string[]>,
+): Promise<void> {
+  const sessionId = args[0];
+  const targetPath = args[1] ?? ".";
+  if (!sessionId) {
+    failUsage("tree");
+  }
+
+  const maxDepth = getNumberOption(options, "depth");
+  if (maxDepth !== undefined && (!Number.isInteger(maxDepth) || maxDepth < 0)) {
+    fail(
+      "Option --depth must be a non-negative integer",
+      "validation_error",
+      "cli.option.invalid_depth",
+      "Provide --depth 0 or a larger whole number.",
+    );
+  }
+
+  const stat = await expectOk(bridge.invoke({
+    sessionId,
+    capability: "repo.stat",
+    input: { path: targetPath },
+  }));
+  const statValue = toRecord(stat.value);
+  if (statValue.exists !== true) {
+    fail(
+      `Path not found: ${targetPath}`,
+      "validation_error",
+      "cli.tree.path_not_found",
+      "Choose an existing repository-relative path and retry `harbor tree`.",
+    );
+  }
+
+  const rootType = typeof statValue.type === "string" ? statValue.type : "other";
+  const rootLabel = targetPath === "." ? "." : targetPath;
+  const lines = [rootLabel];
+  if (rootType === "dir" && maxDepth !== 0) {
+    await appendTreeLines(bridge, sessionId, targetPath, lines, "", 0, maxDepth);
+  }
+
+  process.stdout.write(`${lines.join("\n")}\n`);
+  process.stdout.write(
+    "Next: Use `harbor read <session-id> <path> --repo` to inspect a file, or rerun with `--depth` to expand more levels.\n",
+  );
 }
 
 async function cmdWrite(
@@ -707,6 +774,96 @@ async function cmdAudit(
   );
 }
 
+async function cmdSessions(
+  bridge: HarborAgentBridge,
+  args: string[],
+  options: Record<string, string | boolean | string[]>,
+): Promise<void> {
+  const action = args[0];
+  if (!action) {
+    failUsage("sessions");
+  }
+
+  if (action === "list") {
+    const result = await bridge.listSessions({
+      repoPath: getStringOption(options, "repo"),
+    });
+    printResult(convertBridgeResult(result), "approvals");
+    return;
+  }
+
+  if (action === "inspect") {
+    const sessionId = args[1];
+    if (!sessionId) {
+      failUsage("sessions");
+    }
+    const result = await bridge.getSessionOverview({ sessionId });
+    printResult(convertBridgeResult(result), "review");
+    return;
+  }
+
+  fail(
+    `Unknown sessions action: ${action}`,
+    "usage_error",
+    "sessions.action.unknown",
+    "Use `harbor sessions list` or `harbor sessions inspect <session-id>`.",
+  );
+}
+
+async function cmdArtifact(
+  bridge: HarborAgentBridge,
+  args: string[],
+): Promise<void> {
+  const action = args[0];
+  const sessionId = args[1];
+  const artifactId = args[2];
+  if (action !== "get" || !sessionId || !artifactId) {
+    failUsage("artifact");
+  }
+
+  const result = await bridge.getArtifact({ sessionId, artifactId, asText: true });
+  if (result.status === "ok") {
+    process.stdout.write(`${result.data.content}\n`);
+    return;
+  }
+  printResult(convertBridgeResult(result), "read");
+}
+
+async function cmdMcp(
+  args: string[],
+  options: Record<string, string | boolean | string[]>,
+): Promise<void> {
+  const action = args[0];
+  if (!action) {
+    failUsage("mcp");
+  }
+
+  if (action === "serve") {
+    const { runHarborMcpServer } = await import("@openharbor/mcp-server");
+    await runHarborMcpServer({
+      dataDir: getStringOption(options, "data-dir"),
+      policyPreset: getPolicyPresetOption(options),
+    });
+    return;
+  }
+
+  if (action === "config") {
+    const client = (args[1] ?? "").trim().toLowerCase();
+    if (!client) {
+      failUsage("mcp");
+    }
+    printJson(buildMcpClientConfig(client));
+    return;
+  }
+
+  fail(
+    `Unknown mcp action: ${action}`,
+    "usage_error",
+    "mcp.action.unknown",
+    "Use `harbor mcp serve` or `harbor mcp config <client>`.",
+  );
+}
+
 async function cmdPi(
   args: string[],
   options: Record<string, string | boolean | string[]>,
@@ -985,6 +1142,10 @@ function printResult(result: unknown, command?: ResultCommand): void {
       process.stdout.write(`Next: ${normalized.nextAction}\n`);
     }
   }
+  if (isRecord(normalized) && normalized.status === "not_found") {
+    const message = typeof normalized.message === "string" ? normalized.message : "resource not found";
+    process.stdout.write(`Not found: ${message}\n`);
+  }
   printJson(normalized);
 }
 
@@ -1009,6 +1170,9 @@ function normalizeResultTaxonomy(result: unknown, command?: ResultCommand): unkn
     out.category ??= "validation_error";
     out.errorCode ??= "validation.failed";
     out.nextAction ??= defaultNextActionForValidation(command);
+  } else if (out.status === "not_found") {
+    out.category ??= "not_found";
+    out.errorCode ??= "resource.not_found";
   }
   return out;
 }
@@ -1065,6 +1229,111 @@ function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function buildMcpClientConfig(client: string): Record<string, unknown> {
+  const cliDir = path.dirname(fileURLToPath(import.meta.url));
+  const command = process.execPath;
+  const cliPath = path.resolve(cliDir, "cli.js");
+  const args = [cliPath, "mcp", "serve"];
+
+  if (client === "claude-code" || client === "claude") {
+    return {
+      mcpServers: {
+        openharbor: {
+          command,
+          args,
+        },
+      },
+    };
+  }
+  if (client === "codex") {
+    return {
+      mcp_servers: {
+        openharbor: {
+          command,
+          args,
+        },
+      },
+    };
+  }
+  if (client === "cursor") {
+    return {
+      mcpServers: {
+        openharbor: {
+          command,
+          args,
+        },
+      },
+    };
+  }
+  fail(
+    `Unknown MCP client: ${client}`,
+    "validation_error",
+    "mcp.client.unknown",
+    "Use one of: claude-code, codex, cursor.",
+  );
+}
+
+function convertBridgeResult(result: unknown): unknown {
+  if (!isRecord(result)) {
+    return result;
+  }
+  if (result.status === "ok" && "data" in result) {
+    return { status: "ok", value: result.data };
+  }
+  if (result.status === "approval_required") {
+    const approval = isRecord(result.approval) ? result.approval : {};
+    return {
+      status: "approval_required",
+      message: result.message,
+      intent: result.message,
+      reason: result.reason,
+      nextAction: result.nextAction,
+      grantScopeHint: approval.scopeHint,
+      targetLabel: approval.targetLabel,
+    };
+  }
+  return result;
+}
+
+async function appendTreeLines(
+  bridge: PiHarborBridge,
+  sessionId: string,
+  targetPath: string,
+  lines: string[],
+  prefix: string,
+  depth: number,
+  maxDepth?: number,
+): Promise<void> {
+  const listed = await expectOk(bridge.invoke({
+    sessionId,
+    capability: "repo.listDir",
+    input: { path: targetPath },
+  }));
+  const value = toRecord(listed.value);
+  const entries = Array.isArray(value.entries) ? value.entries.map((entry) => toRecord(entry)) : [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const name = typeof entry.name === "string" ? entry.name : "<unknown>";
+    const entryPath = typeof entry.path === "string" ? entry.path : name;
+    const type = typeof entry.type === "string" ? entry.type : "other";
+    const isLast = index === entries.length - 1;
+    lines.push(`${prefix}${isLast ? "\\-" : "|-"} ${name}`);
+
+    if (type === "dir" && (maxDepth === undefined || depth + 1 < maxDepth)) {
+      await appendTreeLines(
+        bridge,
+        sessionId,
+        entryPath,
+        lines,
+        `${prefix}${isLast ? "   " : "|  "}`,
+        depth + 1,
+        maxDepth,
+      );
+    }
+  }
+}
+
 function printHelp(): void {
   const commandLines = Object.values(COMMAND_USAGE).map((usage) => `  ${usage}`);
   process.stdout.write(
@@ -1076,6 +1345,7 @@ function printHelp(): void {
       "",
       "Core Flow (inspect -> draft -> test -> review -> publish):",
       "  harbor init ./repo",
+      "  harbor tree <session-id> --depth 2",
       "  harbor read <session-id> README.md --repo",
       "  harbor write <session-id> notes.txt --content 'draft change'",
       "  harbor test <session-id> pnpm-test --approve",
@@ -1113,7 +1383,7 @@ async function queryAuditEvents(
   const toMs = toIso ? parseIsoOrFail("to", toIso) : undefined;
   const limit = Math.max(1, Math.floor(getNumberOption(options, "limit") ?? 100));
 
-  const filtered = all.filter((event) => {
+  const filtered = all.filter((event: { type: string; ts: string }) => {
     if (typeFilter && event.type !== typeFilter) {
       return false;
     }
@@ -1463,6 +1733,33 @@ function toRecord(value: unknown): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+async function expectOk(
+  resultPromise: Promise<unknown> | unknown,
+): Promise<Record<string, unknown>> {
+  const result = await resultPromise;
+  const record = toRecord(result);
+  if (record.status === "ok") {
+    return record;
+  }
+
+  const category = typeof record.category === "string"
+    ? record.category
+    : record.status === "approval_required"
+      ? "approval_required"
+      : record.status === "denied"
+        ? "policy_denied"
+        : record.status === "validation_error"
+          ? "validation_error"
+          : "runtime_error";
+  const errorCode = typeof record.errorCode === "string" ? record.errorCode : "cli.command.failed";
+  const message = typeof record.message === "string" ? record.message : "Command failed";
+  const nextAction = typeof record.nextAction === "string"
+    ? record.nextAction
+    : "Retry the command or inspect policy/validation output.";
+
+  fail(message, category as CliErrorCategory, errorCode, nextAction);
 }
 
 function failUsage(command: keyof typeof COMMAND_USAGE): never {

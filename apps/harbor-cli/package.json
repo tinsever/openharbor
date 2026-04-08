@@ -13,6 +13,8 @@
     "harbor": "node ./dist/cli.js"
   },
   "dependencies": {
+    "@openharbor/agent-bridge": "workspace:*",
+    "@openharbor/mcp-server": "workspace:*",
     "@mariozechner/pi-ai": "^0.65.0",
     "@mariozechner/pi-coding-agent": "^0.65.0",
     "@openharbor/pi-integration": "workspace:*"

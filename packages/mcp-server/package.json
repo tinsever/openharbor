@@ -1,5 +1,5 @@
 {
-  "name": "@openharbor/test-sandbox",
+  "name": "@openharbor/mcp-server",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -13,19 +13,17 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "lint": "tsc -p tsconfig.build.json --noEmit",
-    "test": "vitest run"
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"process.exit(0)\""
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/client": "^2.0.0-alpha.2",
+    "@modelcontextprotocol/server": "^2.0.0-alpha.2",
     "@openharbor/agent-bridge": "workspace:*",
-    "@openharbor/core": "workspace:*",
-    "@openharbor/host": "workspace:*"
+    "zod": "^4.1.12"
   },
   "devDependencies": {
-    "typescript": "^5.7.3",
-    "vitest": "^3.0.5"
+    "typescript": "^5.7.3"
   }
 }

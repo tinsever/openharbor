@@ -6,8 +6,6 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../../packages/agent-bridge" },
-    { "path": "../../packages/mcp-server" },
-    { "path": "../../packages/pi-integration" }
+    { "path": "../agent-bridge" }
   ]
 }
