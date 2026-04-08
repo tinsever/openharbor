@@ -22,6 +22,7 @@ If you want agent automation that scales for a team—reviewable, policy-gated, 
 | Policy, not vibes | Allow / deny / limits / require approval—plus presets (`permissive`, `balanced`, `strict`). |
 | Draft-first workflow | Edits land in an overlay; you diff, test, and approve before publish. |
 | Audit trail | Session data and append-only logs so you can inspect and replay what happened. |
+| Capability packs | Static, typed capability-pack registration with metadata validation and CI enforcement. |
 | CLI + API | Same model from `pnpm harbor` or `@openharbor/host` in your own tooling. |
 
 
@@ -72,6 +73,7 @@ Harbor fits teams that want agent automation to scale without every run being a 
 - Built-in policy presets: `permissive`, `balanced`, `strict`
 - Overlay workspace for draft edits before publish
 - Local session store for artifacts, test runs, and audit logs
+- Capability-pack contracts with static registration (`core`, `http-api`, `docs`, `browser-observe`)
 - CLI workflow: inspect → draft → test → review → publish
 
 
@@ -111,6 +113,7 @@ pnpm test
 | `pnpm build` | Build all workspace packages via Turborepo |
 | `pnpm test` | Run all tests |
 | `pnpm lint` | Run configured type/lint checks |
+| `pnpm validate:capability-packs` | Validate capability-pack metadata contracts |
 | `pnpm demo` | Run demo workflow in `demo/` |
 | `pnpm harbor` | Run Harbor CLI |
 
@@ -219,6 +222,12 @@ See [Audit Observability Guide](./docs/audit-observability.md) for:
 - incident-style replay steps (`inspect`, `search`, `replay`)
 
 See [CLI UX Flows](./docs/cli-ux-flows.md) for the top 10 end-to-end CLI workflow checks used for UX validation.
+
+See [Capability-Pack Developer Guide](./docs/capability-packs.md) for:
+
+- pack interface contracts and metadata requirements
+- static registration flow and policy/artifact expectations
+- migration notes from built-ins to capability packs
 
 
 ## License
