@@ -111,7 +111,7 @@ export class LocalHarborStore {
 
   async listSessions(): Promise<SessionRecord[]> {
     try {
-      const entries = await fs.readdir(this.dataDir, { withFileTypes: true });
+      const entries = await fs.readdir(path.join(this.dataDir, "sessions"), { withFileTypes: true });
       const sessions = await Promise.all(
         entries
           .filter((entry) => entry.isDirectory())

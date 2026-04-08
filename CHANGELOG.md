@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-08
+
+### Fixed
+- Corrected session enumeration to read stored sessions from `dataDir/sessions/`, fixing `harbor sessions list` and review flows against non-default Harbor data directories.
+
 ## [0.1.1] - 2026-04-08
 
 ### Added
