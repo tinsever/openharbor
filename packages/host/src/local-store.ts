@@ -45,9 +45,12 @@ export interface AuditIntegrityReport {
   ok: boolean;
   eventCount: number;
   lastHash: string | null;
+  failureCode?: "parse_error" | "missing_integrity" | "chain_mismatch" | "hash_mismatch";
   brokenAtLine?: number;
   reason?: string;
 }
+
+type NormalizedAuditEvent = AuditEvent & { schemaVersion: number };
 
 /**
  * File-backed session, overlay, and append-only audit stream.
@@ -125,10 +128,11 @@ export class LocalHarborStore {
   async appendAudit(sessionId: string, event: AuditEvent): Promise<void> {
     const dir = this.sessionPath(sessionId);
     await ensureDir(dir);
-    const parsed = auditEventSchema.parse(event);
+    const parsed = normalizeAuditEventRaw(event);
     const prevHash = await this.readLastAuditHash(sessionId);
     const sanitizedPayload = canonicalizeAuditPayload(stripAuditIntegrity(parsed.payload));
     const hash = hashAuditRecord({
+      schemaVersion: parsed.schemaVersion,
       id: parsed.id,
       ts: parsed.ts,
       sessionId: parsed.sessionId,
@@ -156,7 +160,7 @@ export class LocalHarborStore {
     try {
       const text = await fs.readFile(file, "utf8");
       const lines = text.split("\n").filter(Boolean);
-      return lines.map((l) => auditEventSchema.parse(JSON.parse(l)));
+      return lines.map((l) => normalizeAuditEventLine(l).event);
     } catch {
       return [];
     }
@@ -171,14 +175,18 @@ export class LocalHarborStore {
       if (!line) {
         continue;
       }
-      let parsed: AuditEvent;
+      let parsed: NormalizedAuditEvent;
+      let hashMode: "legacy" | "v1";
       try {
-        parsed = auditEventSchema.parse(JSON.parse(line));
+        const normalized = normalizeAuditEventLine(line);
+        parsed = normalized.event;
+        hashMode = normalized.hashMode;
       } catch {
         return {
           ok: false,
           eventCount: i,
           lastHash: prevHash,
+          failureCode: "parse_error",
           brokenAtLine: i + 1,
           reason: "Invalid audit event JSON or schema",
         };
@@ -190,6 +198,7 @@ export class LocalHarborStore {
           ok: false,
           eventCount: i,
           lastHash: prevHash,
+          failureCode: "missing_integrity",
           brokenAtLine: i + 1,
           reason: "Missing integrity metadata",
         };
@@ -199,12 +208,15 @@ export class LocalHarborStore {
           ok: false,
           eventCount: i,
           lastHash: prevHash,
+          failureCode: "chain_mismatch",
           brokenAtLine: i + 1,
           reason: "Integrity chain link mismatch",
         };
       }
 
       const expectedHash = hashAuditRecord({
+        schemaVersion: parsed.schemaVersion,
+        hashMode,
         id: parsed.id,
         ts: parsed.ts,
         sessionId: parsed.sessionId,
@@ -217,6 +229,7 @@ export class LocalHarborStore {
           ok: false,
           eventCount: i,
           lastHash: prevHash,
+          failureCode: "hash_mismatch",
           brokenAtLine: i + 1,
           reason: "Integrity hash mismatch",
         };
@@ -386,7 +399,7 @@ export class LocalHarborStore {
       return null;
     }
     try {
-      const event = auditEventSchema.parse(JSON.parse(last));
+      const event = normalizeAuditEventLine(last).event;
       return readAuditIntegrity(event.payload)?.hash ?? null;
     } catch {
       return null;
@@ -430,6 +443,8 @@ function readAuditIntegrity(payload: Record<string, unknown>): {
 }
 
 function hashAuditRecord(input: {
+  schemaVersion: number;
+  hashMode?: "legacy" | "v1";
   id: string;
   ts: string;
   sessionId: string;
@@ -437,8 +452,82 @@ function hashAuditRecord(input: {
   payload: Record<string, unknown>;
   prevHash: string | null;
 }): string {
-  const canonical = stableStringify(input);
+  const canonical = stableStringify(
+    input.hashMode === "legacy"
+      ? {
+          id: input.id,
+          ts: input.ts,
+          sessionId: input.sessionId,
+          type: input.type,
+          payload: input.payload,
+          prevHash: input.prevHash,
+        }
+      : {
+          schemaVersion: input.schemaVersion,
+          id: input.id,
+          ts: input.ts,
+          sessionId: input.sessionId,
+          type: input.type,
+          payload: input.payload,
+          prevHash: input.prevHash,
+        },
+  );
   return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+function normalizeAuditEventLine(line: string): {
+  event: NormalizedAuditEvent;
+  hashMode: "legacy" | "v1";
+} {
+  const raw = JSON.parse(line);
+  const hashMode =
+    !!raw
+    && typeof raw === "object"
+    && typeof (raw as Record<string, unknown>).schemaVersion === "number"
+      ? "v1"
+      : "legacy";
+  return {
+    event: normalizeAuditEventRaw(raw),
+    hashMode,
+  };
+}
+
+function normalizeAuditEventRaw(raw: unknown): NormalizedAuditEvent {
+  try {
+    const parsed = auditEventSchema.parse(raw) as AuditEvent & { schemaVersion?: unknown };
+    const schemaVersion =
+      typeof parsed.schemaVersion === "number" && Number.isFinite(parsed.schemaVersion)
+        ? parsed.schemaVersion
+        : 1;
+    return {
+      ...parsed,
+      schemaVersion,
+    };
+  } catch {
+    if (!raw || typeof raw !== "object") {
+      throw new Error("Invalid audit event");
+    }
+    const legacy = raw as Record<string, unknown>;
+    if (
+      typeof legacy.id !== "string"
+      || typeof legacy.ts !== "string"
+      || typeof legacy.sessionId !== "string"
+      || typeof legacy.type !== "string"
+      || !legacy.payload
+      || typeof legacy.payload !== "object"
+      || Array.isArray(legacy.payload)
+    ) {
+      throw new Error("Invalid audit event");
+    }
+    return {
+      id: legacy.id,
+      ts: legacy.ts,
+      sessionId: legacy.sessionId,
+      type: legacy.type as AuditEvent["type"],
+      payload: legacy.payload as Record<string, unknown>,
+      schemaVersion: 1,
+    };
+  }
 }
 
 function stableStringify(value: unknown): string {

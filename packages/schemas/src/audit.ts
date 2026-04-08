@@ -2,6 +2,8 @@ import { z } from "zod";
 import { policyDecisionSchema } from "./policy.js";
 import { effectClassSchema } from "./effects.js";
 
+export const auditSchemaVersion = 1 as const;
+
 export const auditEventTypeSchema = z.enum([
   "session.created",
   "session.closed",
@@ -25,7 +27,7 @@ export const auditEventTypeSchema = z.enum([
 
 export type AuditEventType = z.infer<typeof auditEventTypeSchema>;
 
-export const auditEventSchema = z.object({
+const auditEventBaseSchema = z.object({
   id: z.string().uuid(),
   ts: z.string(),
   sessionId: z.string().uuid(),
@@ -33,7 +35,21 @@ export const auditEventSchema = z.object({
   payload: z.record(z.unknown()),
 });
 
+export const auditEventSchema = auditEventBaseSchema.extend({
+  schemaVersion: z.literal(auditSchemaVersion),
+});
+
 export type AuditEvent = z.infer<typeof auditEventSchema>;
+
+export const legacyAuditEventSchema = auditEventBaseSchema;
+
+export const auditEventWireSchema = z.union([
+  auditEventSchema,
+  legacyAuditEventSchema.transform((event) => ({
+    ...event,
+    schemaVersion: auditSchemaVersion,
+  })),
+]);
 
 export const capabilityCallAuditPayloadSchema = z.object({
   capabilityName: z.string(),

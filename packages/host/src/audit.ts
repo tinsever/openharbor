@@ -7,10 +7,11 @@ export function makeAuditEvent(
   payload: Record<string, unknown>,
 ): AuditEvent {
   return {
+    schemaVersion: 1,
     id: randomUUID(),
     ts: new Date().toISOString(),
     sessionId,
     type,
     payload,
-  };
+  } as AuditEvent;
 }
