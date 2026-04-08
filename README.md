@@ -218,6 +218,8 @@ See [Audit Observability Guide](./docs/audit-observability.md) for:
 - append-only and integrity guarantees
 - incident-style replay steps (`inspect`, `search`, `replay`)
 
+See [CLI UX Flows](./docs/cli-ux-flows.md) for the top 10 end-to-end CLI workflow checks used for UX validation.
+
 
 ## License
 
