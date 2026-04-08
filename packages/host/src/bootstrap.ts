@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ValidationError } from "@openharbor/core";
 import type { ApprovalGrant } from "@openharbor/policy";
+import type { SessionRecord } from "@openharbor/schemas";
 import {
   createPolicyEngine,
   resolvePolicyPreset,
@@ -14,6 +15,7 @@ import { CapabilityHost, type InvokeContext } from "./capability-host.js";
 import type { RegisteredCapabilityPack } from "./capability-packs.js";
 import { registerDefaultCapabilityPacks } from "./packs/index.js";
 import { makeAuditEvent } from "./audit.js";
+import { getSessionOverview, type SessionOverview } from "./overview.js";
 
 export interface HarborEnvironment {
   readonly dataDir: string;
@@ -21,6 +23,8 @@ export interface HarborEnvironment {
   readonly sessions: SessionManager;
   readonly capabilities: CapabilityHost;
   readonly capabilityPacks: RegisteredCapabilityPack[];
+  listSessions(repoPath?: string): Promise<SessionRecord[]>;
+  getSessionOverview(sessionId: string): Promise<SessionOverview>;
   invoke(
     sessionId: string,
     capabilityName: string,
@@ -83,6 +87,15 @@ export function createHarborEnvironment(
     sessions,
     capabilities,
     capabilityPacks,
+    listSessions: async (repoPath) => {
+      const sessionsList = await sessions.listSessions();
+      if (!repoPath) {
+        return sessionsList;
+      }
+      const normalized = repoPath.trim();
+      return sessionsList.filter((session) => session.repoPath === normalized);
+    },
+    getSessionOverview: (sessionId) => getSessionOverview(sessions, store, sessionId),
     invoke: (sessionId, capabilityName, input, policyOverrides) =>
       invokeCapability(sessions, capabilities, sessionId, capabilityName, input, policyOverrides),
     runModelTask: (sessionId, code, options) =>

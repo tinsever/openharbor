@@ -33,9 +33,15 @@ function findMatchingGrant(
   effect: CapabilityEffectMeta,
   target: ResourceTarget,
   ctx: PolicyContext,
+  options?: {
+    allowTask?: boolean;
+    allowSession?: boolean;
+  },
 ): { scope: GrantScope; key: string } | null {
   const exact = approvalGrantKey(effect.effectClass, target.id);
   const wildcard = approvalGrantKey(effect.effectClass, "*");
+  const allowTask = options?.allowTask ?? true;
+  const allowSession = options?.allowSession ?? true;
   const search = (
     keys: Set<string>,
     scope: GrantScope,
@@ -50,8 +56,8 @@ function findMatchingGrant(
   };
   return (
     search(ctx.approvalGrantsOnce, "once") ??
-    search(ctx.approvalGrantsTask, "task") ??
-    search(ctx.approvalGrantsSession, "session")
+    (allowTask ? search(ctx.approvalGrantsTask, "task") : null) ??
+    (allowSession ? search(ctx.approvalGrantsSession, "session") : null)
   );
 }
 
@@ -79,6 +85,15 @@ const defaultApprovalIntent = (effect: CapabilityEffectMeta, target: ResourceTar
   }
   if (effect.effectClass === "execute.adapter") {
     return `Run test adapter ${target.id}`;
+  }
+  if (effect.effectClass === "read.external") {
+    return `Read external data from ${target.id}`;
+  }
+  if (effect.effectClass === "write.external") {
+    return `Write external data to ${target.id}`;
+  }
+  if (effect.effectClass === "send.external") {
+    return `Send outbound update to ${target.id}`;
   }
   return `${effect.effectClass} on ${target.id}`;
 };
@@ -145,7 +160,16 @@ export function createPolicyPresetRules(preset: PolicyPresetName): PolicyRule[] 
     {
       id: "approval-grants",
       evaluate(effect, target, ctx) {
-        const grant = findMatchingGrant(effect, target, ctx);
+        const isExternal = effect.effectClass === "read.external"
+          || effect.effectClass === "write.external"
+          || effect.effectClass === "send.external";
+        const grant = findMatchingGrant(effect, target, ctx, {
+          allowTask: effect.effectClass !== "send.external",
+          allowSession: !(
+            effect.effectClass === "send.external"
+            || (preset === "strict" && isExternal)
+          ),
+        });
         if (!grant) {
           return null;
         }
@@ -187,6 +211,49 @@ export function createPolicyPresetRules(preset: PolicyPresetName): PolicyRule[] 
           effect.effectClass === "write.artifact"
         ) {
           return { decision: "allow" };
+        }
+        return null;
+      },
+    },
+    {
+      id: "external-effects",
+      evaluate(effect, target) {
+        if (effect.effectClass === "send.external") {
+          return {
+            decision: "require_approval",
+            reason: "outbound external sends always require explicit per-action approval",
+            approvalIntent: defaultApprovalIntent(effect, target),
+            nextAction: "Approve this outbound action for once scope and retry.",
+            targetLabel: target.path ?? target.id,
+            grantScopeHint: "once",
+          };
+        }
+        if (effect.effectClass === "write.external") {
+          return {
+            decision: "require_approval",
+            reason: preset === "strict"
+              ? "strict preset requires approval for every external write"
+              : "external writes require explicit approval",
+            approvalIntent: defaultApprovalIntent(effect, target),
+            nextAction: "Approve this external write with the intended scope and retry.",
+            targetLabel: target.path ?? target.id,
+            grantScopeHint: preset === "strict" ? "once" : "session",
+          };
+        }
+        if (effect.effectClass === "read.external") {
+          if (preset === "permissive") {
+            return { decision: "allow" };
+          }
+          return {
+            decision: "require_approval",
+            reason: preset === "strict"
+              ? "strict preset requires approval for every external read"
+              : "first external read requires approval before continuing",
+            approvalIntent: defaultApprovalIntent(effect, target),
+            nextAction: "Approve this external read and retry.",
+            targetLabel: target.path ?? target.id,
+            grantScopeHint: preset === "strict" ? "once" : "session",
+          };
         }
         return null;
       },

@@ -106,7 +106,12 @@ export class CapabilityHost {
     }
 
     const target = cap.resolveTarget(parsedInput, ctx.session);
-    const record = this.policy.evaluate(cap.effect, target, ctx.policyContext);
+    const record = {
+      ...this.policy.evaluate(cap.effect, target, ctx.policyContext),
+      effectClass: cap.effect.effectClass,
+      targetId: target.id,
+      target,
+    };
     const onceGrantKey = getOnceGrantKey(record);
     if (onceGrantKey && ctx.consumeApprovalGrantOnce) {
       await ctx.consumeApprovalGrantOnce(onceGrantKey);

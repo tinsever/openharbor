@@ -7,6 +7,9 @@ export const effectClassSchema = z.enum([
   "execute.adapter",
   "read.artifact",
   "write.artifact",
+  "read.external",
+  "write.external",
+  "send.external",
   "publish.repo",
   "destructive.repo",
 ]);

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { effectClassSchema, resourceTargetSchema } from "./effects.js";
 
 export const policyDecisionSchema = z.enum([
   "allow",
@@ -21,6 +22,9 @@ export const policyEvaluationRecordSchema = z.object({
   nextAction: z.string().optional(),
   grantScopeHint: grantScopeSchema.optional(),
   targetLabel: z.string().optional(),
+  effectClass: effectClassSchema.optional(),
+  targetId: z.string().optional(),
+  target: resourceTargetSchema.optional(),
 });
 
 export type PolicyEvaluationRecord = z.infer<typeof policyEvaluationRecordSchema>;

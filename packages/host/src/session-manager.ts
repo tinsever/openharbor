@@ -8,6 +8,7 @@ import type {
   SessionRecord,
 } from "@openharbor/schemas";
 import { OverlayWorkspace } from "@openharbor/overlay";
+import { SessionNotFoundError } from "@openharbor/core";
 import { makeAuditEvent } from "./audit.js";
 import type { LocalHarborStore } from "./local-store.js";
 
@@ -61,7 +62,7 @@ export class SessionManager {
     }
     const session = await this.store.loadSession(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionNotFoundError(sessionId);
     }
     const persisted = await this.store.loadOverlay(sessionId);
     const overlay = persisted
@@ -216,6 +217,18 @@ export class SessionManager {
 
   async persistApprovalGrants(sessionId: string): Promise<void> {
     await this.store.saveApprovalGrants(sessionId, this.approvalGrants.get(sessionId) ?? []);
+  }
+
+  async listSessions(): Promise<SessionRecord[]> {
+    return this.store.listSessions();
+  }
+
+  async getSessionRecord(sessionId: string): Promise<SessionRecord | null> {
+    const hit = this.cache.get(sessionId);
+    if (hit) {
+      return hit.session;
+    }
+    return this.store.loadSession(sessionId);
   }
 
   private revokeApprovalGrantsWhere(

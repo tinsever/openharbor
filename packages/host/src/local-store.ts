@@ -109,6 +109,22 @@ export class LocalHarborStore {
     }
   }
 
+  async listSessions(): Promise<SessionRecord[]> {
+    try {
+      const entries = await fs.readdir(this.dataDir, { withFileTypes: true });
+      const sessions = await Promise.all(
+        entries
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => this.loadSession(entry.name)),
+      );
+      return sessions
+        .filter((session): session is SessionRecord => session !== null)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    } catch {
+      return [];
+    }
+  }
+
   async saveOverlay(sessionId: string, state: OverlayPersistedState): Promise<void> {
     const dir = this.sessionPath(sessionId);
     await ensureDir(dir);

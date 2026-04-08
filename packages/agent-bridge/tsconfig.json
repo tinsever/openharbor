@@ -6,7 +6,7 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../agent-bridge" },
+    { "path": "../core" },
     { "path": "../host" },
     { "path": "../policy" }
   ]

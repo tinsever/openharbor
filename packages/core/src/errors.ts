@@ -36,3 +36,10 @@ export class ValidationError extends Error {
     super(message);
   }
 }
+
+export class SessionNotFoundError extends Error {
+  readonly name = "SessionNotFoundError";
+  constructor(readonly sessionId: string) {
+    super(`Session not found: ${sessionId}`);
+  }
+}

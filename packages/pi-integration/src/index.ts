@@ -1,27 +1,12 @@
 import {
-  resolvePolicyPreset,
-  type ApprovalGrant,
-  type PolicyPresetName,
-} from "@openharbor/policy";
-import {
-  ApprovalRequiredError,
-  CapabilityNotFoundError,
-  PolicyDeniedError,
-  ValidationError,
-} from "@openharbor/core";
-import {
-  createHarborEnvironment,
-  type HarborEnvironment,
-  type InvokePolicyOverrides,
-  type RunModelTaskOptions,
-  type RunModelTaskResult,
-} from "@openharbor/host";
+  createHarborAgentBridge,
+  type BridgeResult,
+  type HarborAgentBridge,
+  type HarborAgentBridgeOptions,
+} from "@openharbor/agent-bridge";
+import { resolvePolicyPreset, type ApprovalGrant } from "@openharbor/policy";
 
-export interface PiIntegrationOptions {
-  dataDir?: string;
-  approvedAdapters?: Iterable<string>;
-  policyPreset?: PolicyPresetName | string;
-}
+export interface PiIntegrationOptions extends HarborAgentBridgeOptions {}
 
 export { resolvePolicyPreset } from "@openharbor/policy";
 export type { ApprovalGrant, PolicyPresetName } from "@openharbor/policy";
@@ -39,7 +24,7 @@ export type PiInvokeResult =
       status: "ok";
       value: unknown;
     }
-    | {
+  | {
       status: "approval_required";
       message: string;
       intent?: string;
@@ -64,6 +49,13 @@ export type PiInvokeResult =
       message: string;
       issues: unknown;
       nextAction?: string;
+      category?: string;
+      errorCode?: string;
+    }
+  | {
+      status: "not_found";
+      message: string;
+      entity: "session" | "artifact" | "file" | "path";
       category?: string;
       errorCode?: string;
     };
@@ -73,34 +65,29 @@ export type PiRunModelTaskResult =
       status: "ok";
       value: RunModelTaskResult;
     }
-    | {
-      status: "approval_required";
-      message: string;
-      intent?: string;
-      reason?: string;
-      nextAction?: string;
-      grantScopeHint?: ApprovalGrant["scope"];
-      targetLabel?: string;
-      category?: string;
-      errorCode?: string;
-    }
-  | {
-      status: "denied";
-      message: string;
-      reason?: string;
-      nextAction?: string;
-      targetLabel?: string;
-      category?: string;
-      errorCode?: string;
-    }
-  | {
-      status: "validation_error";
-      message: string;
-      issues: unknown;
-      nextAction?: string;
-      category?: string;
-      errorCode?: string;
-    };
+  | Exclude<PiInvokeResult, { status: "ok" }>;
+
+export interface RunModelTaskResult {
+  modelRunId: string;
+  ok: boolean;
+  value?: unknown;
+  error?: string;
+  timedOut: boolean;
+  durationMs: number;
+  stdoutArtifactId?: string;
+  stderrArtifactId?: string;
+  truncatedOutput: boolean;
+}
+
+export interface RunModelTaskOptions {
+  taskId?: string;
+  limits?: {
+    timeoutMs?: number;
+    maxOutputChars?: number;
+    maxCodeUnits?: number;
+    maxHeapBytes?: number;
+  };
+}
 
 export interface HarborSessionSummary {
   id: string;
@@ -111,93 +98,52 @@ export interface HarborSessionSummary {
 }
 
 /**
- * Bridge layer for Pi-hosted UX surfaces (CLI/TUI) to interact with Harbor host semantics.
- * Harbor capability, policy, and approval behavior remains in core packages.
+ * Deprecated compatibility bridge for Pi-hosted UX surfaces.
+ * New integrations should target @openharbor/agent-bridge or the Harbor MCP server.
  */
 export class PiHarborBridge {
-  readonly env: HarborEnvironment;
-  private readonly approvedAdapters: Set<string>;
+  readonly bridge: HarborAgentBridge;
 
   constructor(opts: PiIntegrationOptions = {}) {
-    this.env = createHarborEnvironment({
+    this.bridge = createHarborAgentBridge({
       dataDir: opts.dataDir,
+      approvedAdapters: opts.approvedAdapters,
       policyPreset: resolvePolicyPreset(opts.policyPreset),
     });
-    this.approvedAdapters = new Set(opts.approvedAdapters ?? []);
+  }
+
+  get env() {
+    return this.bridge.env;
   }
 
   listCapabilities(): string[] {
-    return this.env.capabilities.listRegistered();
+    return this.bridge.listCapabilities();
   }
 
   async createSession(repoPath: string, name?: string): Promise<HarborSessionSummary> {
-    const session = await this.env.sessions.createSession(repoPath, name);
-    return {
-      id: session.id,
-      repoPath: session.repoPath,
-      name: session.name,
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
-    };
+    const result = await this.bridge.openSession({ repoPath, name });
+    if (result.status !== "ok") {
+      throw new Error(`Expected ok result when creating session, got ${result.status}`);
+    }
+    return result.data;
   }
 
   async invoke(req: InvokeRequest): Promise<PiInvokeResult> {
-    const overrides: InvokePolicyOverrides = {
-      approvedAdapters: this.approvedAdapters,
+    if (!this.bridge.listCapabilities().includes(req.capability)) {
+      return {
+        status: "validation_error",
+        message: `Unknown capability: ${req.capability}`,
+        issues: { capabilityName: req.capability },
+        nextAction: "Choose a capability from `harbor caps` and retry.",
+        category: "capability_error",
+        errorCode: "capability.not_found",
+      };
+    }
+    const result = await this.bridge.invokeCapability(req.sessionId, req.capability, req.input, {
       approvalGrants: req.approvalGrants,
       taskId: req.taskId,
-    };
-
-    try {
-      const value = await this.env.invoke(req.sessionId, req.capability, req.input, overrides);
-      return { status: "ok", value };
-    } catch (error) {
-      if (error instanceof ApprovalRequiredError) {
-        return {
-          status: "approval_required",
-          message: error.message,
-          intent: error.record.approvalIntent,
-          reason: error.record.reason,
-          nextAction: error.record.nextAction,
-          grantScopeHint: error.record.grantScopeHint,
-          targetLabel: error.record.targetLabel,
-          category: "approval_required",
-          errorCode: "approval.required",
-        };
-      }
-      if (error instanceof PolicyDeniedError) {
-        return {
-          status: "denied",
-          message: error.message,
-          reason: error.record.reason,
-          nextAction: error.record.nextAction,
-          targetLabel: error.record.targetLabel,
-          category: "policy_denied",
-          errorCode: "policy.denied",
-        };
-      }
-      if (error instanceof CapabilityNotFoundError) {
-        return {
-          status: "validation_error",
-          message: error.message,
-          issues: { capabilityName: error.capabilityName },
-          nextAction: "Choose a capability from `harbor caps` and retry.",
-          category: "capability_error",
-          errorCode: "capability.not_found",
-        };
-      }
-      if (error instanceof ValidationError) {
-        return {
-          status: "validation_error",
-          message: error.message,
-          issues: error.issues,
-          nextAction: "Fix invalid input and retry this capability call.",
-          category: "validation_error",
-          errorCode: "validation.failed",
-        };
-      }
-      throw error;
-    }
+    });
+    return toPiResult(result);
   }
 
   async runModelTask(
@@ -208,56 +154,16 @@ export class PiHarborBridge {
       taskId?: string;
     },
   ): Promise<PiRunModelTaskResult> {
-    const policyOverrides: InvokePolicyOverrides = {
-      approvedAdapters: this.approvedAdapters,
-      approvalGrants: options?.approvalGrants,
+    const result = await this.bridge.runModelTask({
+      sessionId,
+      code,
+      limits: options?.limits,
       taskId: options?.taskId,
-    };
-
-    try {
-      const value = await this.env.runModelTask(sessionId, code, {
-        limits: options?.limits,
-        taskId: options?.taskId,
-        policyOverrides,
-      });
-      return { status: "ok", value };
-    } catch (error) {
-      if (error instanceof ApprovalRequiredError) {
-        return {
-          status: "approval_required",
-          message: error.message,
-          intent: error.record.approvalIntent,
-          reason: error.record.reason,
-          nextAction: error.record.nextAction,
-          grantScopeHint: error.record.grantScopeHint,
-          targetLabel: error.record.targetLabel,
-          category: "approval_required",
-          errorCode: "approval.required",
-        };
-      }
-      if (error instanceof PolicyDeniedError) {
-        return {
-          status: "denied",
-          message: error.message,
-          reason: error.record.reason,
-          nextAction: error.record.nextAction,
-          targetLabel: error.record.targetLabel,
-          category: "policy_denied",
-          errorCode: "policy.denied",
-        };
-      }
-      if (error instanceof ValidationError) {
-        return {
-          status: "validation_error",
-          message: error.message,
-          issues: error.issues,
-          nextAction: "Fix invalid model task inputs and retry.",
-          category: "validation_error",
-          errorCode: "validation.failed",
-        };
-      }
-      throw error;
-    }
+      approvalGrants: options?.approvalGrants,
+    });
+    return result.status === "ok"
+      ? { status: "ok", value: result.data }
+      : (toPiResult(result) as PiRunModelTaskResult);
   }
 
   makeApprovalGrant(
@@ -273,6 +179,53 @@ export class PiHarborBridge {
   }
 
   addApprovedAdapter(name: string): void {
-    this.approvedAdapters.add(name);
+    this.bridge.addApprovedAdapter(name);
   }
+}
+
+function toPiResult(result: BridgeResult<unknown>): PiInvokeResult {
+  if (result.status === "ok") {
+    return { status: "ok", value: result.data };
+  }
+  if (result.status === "approval_required") {
+    return {
+      status: "approval_required",
+      message: result.message,
+      intent: result.message,
+      reason: result.reason,
+      nextAction: result.nextAction,
+      grantScopeHint: result.approval.scopeHint,
+      targetLabel: result.approval.targetLabel,
+      category: "approval_required",
+      errorCode: "approval.required",
+    };
+  }
+  if (result.status === "denied") {
+    return {
+      status: "denied",
+      message: result.message,
+      reason: result.reason,
+      nextAction: result.nextAction,
+      targetLabel: result.targetLabel,
+      category: "policy_denied",
+      errorCode: "policy.denied",
+    };
+  }
+  if (result.status === "not_found") {
+    return {
+      status: "not_found",
+      message: result.message,
+      entity: result.entity,
+      category: "not_found",
+      errorCode: "resource.not_found",
+    };
+  }
+  return {
+    status: "validation_error",
+    message: result.message,
+    issues: result.issues,
+    nextAction: result.nextAction,
+    category: "validation_error",
+    errorCode: "validation.failed",
+  };
 }
