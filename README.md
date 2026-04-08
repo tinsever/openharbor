@@ -134,6 +134,8 @@ pnpm harbor write <session-id> notes.txt --content "draft change"
 pnpm harbor delete <session-id> packages
 pnpm harbor diff <session-id>
 pnpm harbor test <session-id> pnpm-test --approve
+pnpm harbor audit inspect <session-id> --verify
+pnpm harbor audit replay <session-id>
 pnpm harbor publish <session-id> --approve --yes
 ```
 
@@ -173,6 +175,14 @@ pnpm demo
 ```
 
 See `demo/README.md` for the step-by-step walkthrough.
+
+## Audit and replay workflow
+
+See [Audit Observability Guide](./docs/audit-observability.md) for:
+
+- audit schema version migration notes
+- append-only and integrity guarantees
+- incident-style replay steps (`inspect`, `search`, `replay`)
 
 ## License
 
