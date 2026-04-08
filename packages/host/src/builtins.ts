@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { z } from "zod";
 import { normalizeRepoRelative } from "@openharbor/overlay";
+import type { CapabilityDescriptor } from "@openharbor/schemas";
 import type { CapabilityHost, InvokeContext } from "./capability-host.js";
 import { makeAuditEvent } from "./audit.js";
 
@@ -188,7 +189,8 @@ async function pruneEmptyParentDirs(repoRoot: string, fileAbsPath: string): Prom
 /**
  * Minimal v0 capability implementations (typed host-side; not model runtime).
  */
-export function registerBuiltinCapabilities(host: CapabilityHost): void {
+export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDescriptor[] {
+  const before = new Set(host.listDescriptors().map((item) => item.name));
   host.register({
     name: "artifacts.put",
     description: "Store text content as a session artifact",
@@ -1152,4 +1154,9 @@ export function registerBuiltinCapabilities(host: CapabilityHost): void {
       };
     },
   });
+
+  return host
+    .listDescriptors()
+    .filter((item) => !before.has(item.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }

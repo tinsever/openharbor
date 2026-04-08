@@ -1,11 +1,13 @@
 import type { ZodType } from "zod";
 import type {
   AuditEvent,
+  CapabilityDescriptor,
   CapabilityEffectMeta,
   PolicyEvaluationRecord,
   ResourceTarget,
   SessionRecord,
 } from "@openharbor/schemas";
+import { capabilityDescriptorSchema } from "@openharbor/schemas";
 import {
   ApprovalRequiredError,
   CapabilityNotFoundError,
@@ -31,6 +33,7 @@ export interface InvokeContext {
 type CapabilityHandler<TIn, TOut> = (input: TIn, ctx: InvokeContext) => Promise<TOut>;
 
 interface RegisteredCapability {
+  descriptor: CapabilityDescriptor;
   name: string;
   description?: string;
   effect: CapabilityEffectMeta;
@@ -42,6 +45,7 @@ interface RegisteredCapability {
 
 export class CapabilityHost {
   private readonly registry = new Map<string, RegisteredCapability>();
+  private readonly descriptors = new Map<string, CapabilityDescriptor>();
 
   constructor(
     private readonly policy: PolicyEngine,
@@ -56,8 +60,18 @@ export class CapabilityHost {
     output: ZodType<TOut>;
     resolveTarget: (input: TIn, session: SessionRecord) => ResourceTarget;
     handler: CapabilityHandler<TIn, TOut>;
-  }): void {
+    inputSchemaId?: string;
+    outputSchemaId?: string;
+  }): CapabilityDescriptor {
+    const descriptor = capabilityDescriptorSchema.parse({
+      name: def.name,
+      description: def.description,
+      effect: def.effect,
+      inputSchemaId: def.inputSchemaId ?? `${def.name}.input`,
+      outputSchemaId: def.outputSchemaId ?? `${def.name}.output`,
+    });
     const entry: RegisteredCapability = {
+      descriptor,
       name: def.name,
       description: def.description,
       effect: def.effect,
@@ -70,6 +84,8 @@ export class CapabilityHost {
       handler: def.handler as CapabilityHandler<unknown, unknown>,
     };
     this.registry.set(def.name, entry);
+    this.descriptors.set(def.name, descriptor);
+    return descriptor;
   }
 
   async invoke<TOut>(
@@ -192,6 +208,10 @@ export class CapabilityHost {
 
   listRegistered(): string[] {
     return [...this.registry.keys()].sort();
+  }
+
+  listDescriptors(): CapabilityDescriptor[] {
+    return [...this.descriptors.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 }
 

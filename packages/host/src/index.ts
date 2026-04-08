@@ -3,5 +3,7 @@ export * from "./local-store.js";
 export * from "./audit.js";
 export * from "./session-manager.js";
 export * from "./capability-host.js";
+export * from "./capability-packs.js";
 export * from "./builtins.js";
+export * from "./packs/index.js";
 export * from "./bootstrap.js";

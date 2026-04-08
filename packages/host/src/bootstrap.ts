@@ -11,14 +11,16 @@ import { defaultDataDir } from "./paths.js";
 import { LocalHarborStore } from "./local-store.js";
 import { SessionManager } from "./session-manager.js";
 import { CapabilityHost, type InvokeContext } from "./capability-host.js";
+import type { RegisteredCapabilityPack } from "./capability-packs.js";
+import { registerDefaultCapabilityPacks } from "./packs/index.js";
 import { makeAuditEvent } from "./audit.js";
-import { registerBuiltinCapabilities } from "./builtins.js";
 
 export interface HarborEnvironment {
   readonly dataDir: string;
   readonly store: LocalHarborStore;
   readonly sessions: SessionManager;
   readonly capabilities: CapabilityHost;
+  readonly capabilityPacks: RegisteredCapabilityPack[];
   invoke(
     sessionId: string,
     capabilityName: string,
@@ -73,13 +75,14 @@ export function createHarborEnvironment(
   const sessions = new SessionManager(store);
   const capabilities = new CapabilityHost(policy, store);
   const runtime = createHarborRuntime();
-  registerBuiltinCapabilities(capabilities);
+  const capabilityPacks = registerDefaultCapabilityPacks(capabilities);
 
   return {
     dataDir,
     store,
     sessions,
     capabilities,
+    capabilityPacks,
     invoke: (sessionId, capabilityName, input, policyOverrides) =>
       invokeCapability(sessions, capabilities, sessionId, capabilityName, input, policyOverrides),
     runModelTask: (sessionId, code, options) =>
