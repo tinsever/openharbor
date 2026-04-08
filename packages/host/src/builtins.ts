@@ -994,6 +994,17 @@ export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDes
     output: z.object({
       changeCount: z.number(),
       paths: z.array(z.string()),
+      files: z.array(z.object({
+        path: z.string(),
+        hunkCount: z.number().int().nonnegative(),
+        addedLines: z.number().int().nonnegative(),
+        removedLines: z.number().int().nonnegative(),
+      })),
+      summary: z.object({
+        fileCount: z.number().int().nonnegative(),
+        addedLines: z.number().int().nonnegative(),
+        removedLines: z.number().int().nonnegative(),
+      }),
     }),
     resolveTarget: (_input, _session) => ({
       kind: "overlay_path" as const,
@@ -1001,9 +1012,21 @@ export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDes
     }),
     handler: async (_input, ctx) => {
       const changes = await ctx.overlay.listChangesResolved();
+      const diffs = await ctx.overlay.diffAll();
       return {
         changeCount: changes.length,
         paths: changes.map((c) => c.path),
+        files: diffs.map((file) => ({
+          path: file.path,
+          hunkCount: file.hunks.length,
+          addedLines: countPrefixedLines(file.hunks, "+"),
+          removedLines: countPrefixedLines(file.hunks, "-"),
+        })),
+        summary: {
+          fileCount: diffs.length,
+          addedLines: countDiffLines(diffs, "+"),
+          removedLines: countDiffLines(diffs, "-"),
+        },
       };
     },
   });
@@ -1159,4 +1182,30 @@ export function registerBuiltinCapabilities(host: CapabilityHost): CapabilityDes
     .listDescriptors()
     .filter((item) => !before.has(item.name))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function countPrefixedLines(
+  hunks: Array<{ lines: string[] }>,
+  prefix: "+" | "-",
+): number {
+  let total = 0;
+  for (const hunk of hunks) {
+    for (const line of hunk.lines) {
+      if (line.startsWith(prefix) && !line.startsWith(`${prefix}${prefix}${prefix}`)) {
+        total += 1;
+      }
+    }
+  }
+  return total;
+}
+
+function countDiffLines(
+  files: Array<{ hunks: Array<{ lines: string[] }> }>,
+  prefix: "+" | "-",
+): number {
+  let total = 0;
+  for (const file of files) {
+    total += countPrefixedLines(file.hunks, prefix);
+  }
+  return total;
 }
