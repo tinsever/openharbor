@@ -78,6 +78,9 @@ async function main(): Promise<void> {
     case "approvals":
       await cmdApprovals(bridge, rest, parsed.options);
       return;
+    case "audit":
+      await cmdAudit(bridge, rest, parsed.options);
+      return;
     case "pi":
       await cmdPi(rest, parsed.options);
       return;
@@ -505,6 +508,91 @@ async function cmdApprovals(
   fail(`Unknown approvals action: ${action}`);
 }
 
+async function cmdAudit(
+  bridge: PiHarborBridge,
+  args: string[],
+  options: Record<string, string | boolean | string[]>,
+): Promise<void> {
+  const action = args[0];
+  const sessionId = args[1];
+  if (!action || !sessionId) {
+    fail("Usage: harbor audit <inspect|search|replay> <session-id> [flags]");
+  }
+
+  await bridge.env.sessions.getBundle(sessionId);
+
+  if (action === "inspect") {
+    const filtered = await queryAuditEvents(bridge, sessionId, options);
+    const includeVerify = options.verify === true;
+    const integrity = includeVerify ? await bridge.env.store.verifyAuditIntegrity(sessionId) : undefined;
+    printJson({
+      sessionId,
+      totalEvents: filtered.totalEvents,
+      returnedEvents: filtered.events.length,
+      filters: filtered.filters,
+      events: filtered.events,
+      integrity,
+    });
+    return;
+  }
+
+  if (action === "search") {
+    const query = getStringOption(options, "query");
+    if (!query) {
+      fail("Usage: harbor audit search <session-id> --query <text> [--limit N] [--type <eventType>]");
+    }
+    const filtered = await queryAuditEvents(bridge, sessionId, options);
+    const needle = query.toLowerCase();
+    const matches = filtered.events.filter((event) => {
+      const eventObj = toRecord(event);
+      const haystack = `${String(eventObj.type ?? "")} ${JSON.stringify(eventObj.payload ?? {})}`.toLowerCase();
+      return haystack.includes(needle);
+    });
+    printJson({
+      sessionId,
+      query,
+      totalEvents: filtered.totalEvents,
+      searchedEvents: filtered.events.length,
+      matchCount: matches.length,
+      filters: filtered.filters,
+      matches,
+    });
+    return;
+  }
+
+  if (action === "replay") {
+    const allEvents = await bridge.env.store.readAudit(sessionId);
+    const integrity = await bridge.env.store.verifyAuditIntegrity(sessionId);
+    const timeline = buildReplayTimeline(allEvents);
+
+    process.stdout.write(`Replay Summary (${sessionId.slice(0, 8)})\n`);
+    process.stdout.write(`  events: ${allEvents.length}\n`);
+    process.stdout.write(`  model runs: ${timeline.modelRuns.total}\n`);
+    process.stdout.write(
+      `  approvals: granted=${timeline.approvals.granted}, used=${timeline.approvals.used}, revoked=${timeline.approvals.revoked}\n`,
+    );
+    process.stdout.write(
+      `  policy: denied=${timeline.policy.denied}, approval_required=${timeline.policy.requireApproval}\n`,
+    );
+    process.stdout.write(
+      `  publish: requested=${timeline.publish.requested}, applied=${timeline.publish.applied}, rejected=${timeline.publish.rejected}\n`,
+    );
+    if (timeline.changes.paths.length > 0) {
+      process.stdout.write(`  changed paths: ${timeline.changes.paths.join(", ")}\n`);
+    }
+
+    printJson({
+      sessionId,
+      integrity,
+      timeline,
+      events: allEvents,
+    });
+    return;
+  }
+
+  fail(`Unknown audit action: ${action}`);
+}
+
 async function cmdPi(
   args: string[],
   options: Record<string, string | boolean | string[]>,
@@ -629,6 +717,21 @@ function getStringOption(
   return String(value);
 }
 
+function getNumberOption(
+  options: Record<string, string | boolean | string[]>,
+  key: string,
+): number | undefined {
+  const raw = getStringOption(options, key);
+  if (raw === undefined) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    fail(`Option --${key} must be a number`);
+  }
+  return parsed;
+}
+
 function getStringArrayOption(
   options: Record<string, string | boolean | string[]>,
   key: string,
@@ -750,6 +853,9 @@ function printHelp(): void {
       "  harbor publish <session-id> [--approve] [--approve-scope <once|task|session>] [--task-id <id>] [--yes] [--policy-preset <name>]",
       "  harbor approvals list <session-id> [--include-inactive]",
       "  harbor approvals revoke <session-id> (--grant-id <id> | --task-id <task> | --all) [--reason <text>]",
+      "  harbor audit inspect <session-id> [--limit N] [--type <eventType>] [--from <iso>] [--to <iso>] [--verify]",
+      "  harbor audit search <session-id> --query <text> [--limit N] [--type <eventType>] [--from <iso>] [--to <iso>]",
+      "  harbor audit replay <session-id>",
       "  harbor pi [repo-path] [--repo <path>] [--data-dir <dir>] [--approved-adapters <csv>] [--policy-preset <name>] [--keep-default-tools] [-- <pi args>]",
       "",
       "Policy presets: permissive, balanced, strict",
@@ -757,6 +863,159 @@ function printHelp(): void {
       "Environment: OPENHARBOR_POLICY_PRESET=<name>",
     ].join("\n") + "\n",
   );
+}
+
+async function queryAuditEvents(
+  bridge: PiHarborBridge,
+  sessionId: string,
+  options: Record<string, string | boolean | string[]>,
+): Promise<{
+  totalEvents: number;
+  events: unknown[];
+  filters: Record<string, unknown>;
+}> {
+  const all = await bridge.env.store.readAudit(sessionId);
+  const typeFilter = getStringOption(options, "type");
+  const fromIso = getStringOption(options, "from");
+  const toIso = getStringOption(options, "to");
+  const fromMs = fromIso ? parseIsoOrFail("from", fromIso) : undefined;
+  const toMs = toIso ? parseIsoOrFail("to", toIso) : undefined;
+  const limit = Math.max(1, Math.floor(getNumberOption(options, "limit") ?? 100));
+
+  const filtered = all.filter((event) => {
+    if (typeFilter && event.type !== typeFilter) {
+      return false;
+    }
+    const ts = Date.parse(event.ts);
+    if (fromMs !== undefined && Number.isFinite(ts) && ts < fromMs) {
+      return false;
+    }
+    if (toMs !== undefined && Number.isFinite(ts) && ts > toMs) {
+      return false;
+    }
+    return true;
+  });
+
+  const limited = filtered.slice(-limit);
+  return {
+    totalEvents: all.length,
+    events: limited,
+    filters: {
+      type: typeFilter ?? null,
+      from: fromIso ?? null,
+      to: toIso ?? null,
+      limit,
+    },
+  };
+}
+
+function parseIsoOrFail(name: "from" | "to", value: string): number {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    fail(`Option --${name} must be an ISO timestamp`);
+  }
+  return parsed;
+}
+
+function buildReplayTimeline(
+  events: unknown[],
+): {
+  modelRuns: { total: number; completed: number; failed: number };
+  approvals: { granted: number; used: number; revoked: number };
+  policy: { denied: number; requireApproval: number };
+  publish: { requested: number; applied: number; rejected: number };
+  capabilityCalls: Array<{ capabilityName: string; count: number }>;
+  changes: { paths: string[] };
+} {
+  const capabilityCalls = new Map<string, number>();
+  const changedPaths = new Set<string>();
+
+  let modelRunStarted = 0;
+  let modelRunCompleted = 0;
+  let modelRunFailed = 0;
+  let approvalGranted = 0;
+  let approvalUsed = 0;
+  let approvalRevoked = 0;
+  let publishRequested = 0;
+  let publishApplied = 0;
+  let publishRejected = 0;
+  let denied = 0;
+  let requireApproval = 0;
+
+  for (const rawEvent of events) {
+    const event = toRecord(rawEvent);
+    const type = typeof event.type === "string" ? event.type : "";
+    const payload = toRecord(event.payload);
+
+    if (type === "model_run.started") {
+      modelRunStarted += 1;
+    } else if (type === "model_run.completed") {
+      modelRunCompleted += 1;
+    } else if (type === "model_run.failed") {
+      modelRunFailed += 1;
+    } else if (type === "approval.granted") {
+      approvalGranted += 1;
+    } else if (type === "approval.used") {
+      approvalUsed += 1;
+    } else if (type === "approval.revoked") {
+      approvalRevoked += 1;
+    } else if (type === "publish.requested") {
+      publishRequested += 1;
+    } else if (type === "publish.applied") {
+      publishApplied += 1;
+      const paths = Array.isArray(payload.paths) ? payload.paths : [];
+      for (const value of paths) {
+        if (typeof value === "string") {
+          changedPaths.add(value);
+        }
+      }
+    } else if (type === "publish.rejected") {
+      publishRejected += 1;
+    } else if (type === "capability.call") {
+      const name = typeof payload.capabilityName === "string" ? payload.capabilityName : "<unknown>";
+      capabilityCalls.set(name, (capabilityCalls.get(name) ?? 0) + 1);
+    } else if (type === "overlay.mutated") {
+      const pathValue = typeof payload.path === "string" ? payload.path : null;
+      if (pathValue) {
+        changedPaths.add(pathValue);
+      }
+    } else if (type === "policy.evaluation") {
+      const decision = typeof payload.decision === "string" ? payload.decision : "";
+      if (decision === "deny") {
+        denied += 1;
+      } else if (decision === "require_approval") {
+        requireApproval += 1;
+      }
+    }
+  }
+
+  return {
+    modelRuns: {
+      total: modelRunStarted,
+      completed: modelRunCompleted,
+      failed: modelRunFailed,
+    },
+    approvals: {
+      granted: approvalGranted,
+      used: approvalUsed,
+      revoked: approvalRevoked,
+    },
+    policy: {
+      denied,
+      requireApproval,
+    },
+    publish: {
+      requested: publishRequested,
+      applied: publishApplied,
+      rejected: publishRejected,
+    },
+    capabilityCalls: [...capabilityCalls.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([capabilityName, count]) => ({ capabilityName, count })),
+    changes: {
+      paths: [...changedPaths].sort(),
+    },
+  };
 }
 
 function printReviewBundle(
@@ -814,8 +1073,10 @@ function printReviewBundle(
   } else {
     const latest = toRecord(runs[0]);
     const adapter = typeof latest.adapter === "string" ? latest.adapter : "<unknown>";
+    const runId = typeof latest.runId === "string" ? latest.runId : "<unknown>";
     const ok = latest.ok === true;
     process.stdout.write(`  Latest run: ${adapter} (${ok ? "ok" : "failed"})\n`);
+    process.stdout.write(`  runId: ${runId}\n`);
     if (typeof latest.stdoutArtifactId === "string") {
       process.stdout.write(`  stdout artifact: ${latest.stdoutArtifactId}\n`);
     }
