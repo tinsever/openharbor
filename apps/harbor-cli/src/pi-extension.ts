@@ -59,6 +59,11 @@ function resultToText(result: PiInvokeResult): string {
   }
   if (result.status === "approval_required") {
     const lines = [result.intent ?? result.message];
+    if (result.category || result.errorCode) {
+      lines.push(
+        `Category: ${result.category ?? "approval_required"}${result.errorCode ? ` (${result.errorCode})` : ""}`,
+      );
+    }
     if (result.reason) {
       lines.push(`Reason: ${result.reason}`);
     }
@@ -72,6 +77,11 @@ function resultToText(result: PiInvokeResult): string {
   }
   if (result.status === "denied") {
     const lines = [result.message];
+    if (result.category || result.errorCode) {
+      lines.push(
+        `Category: ${result.category ?? "policy_denied"}${result.errorCode ? ` (${result.errorCode})` : ""}`,
+      );
+    }
     if (result.reason) {
       lines.push(`Reason: ${result.reason}`);
     }
@@ -81,7 +91,10 @@ function resultToText(result: PiInvokeResult): string {
     return lines.join("\n");
   }
   if (result.status === "validation_error") {
-    return `${result.message}\n${JSON.stringify(result.issues, null, 2)}`;
+    const header = result.category || result.errorCode
+      ? `${result.message}\nCategory: ${result.category ?? "validation_error"}${result.errorCode ? ` (${result.errorCode})` : ""}`
+      : result.message;
+    return `${header}\n${JSON.stringify(result.issues, null, 2)}`;
   }
   const _exhaustive: never = result;
   return JSON.stringify(_exhaustive);
